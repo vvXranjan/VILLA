@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store
+.vscode/
+.idea/
+
+# Private guest information
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+data/
+uploads/
+guest_data/
+attendance/
+
+# Logs
+*.log
