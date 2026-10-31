@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>VILLA — Diwali Gate Check-in</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">🪔 VILLA — Diwali Gate Check-in</div>
+  <div id="statsBar" class="stats">Loading…</div>
+</header>
+
+<nav>
+  <button class="tab-btn active" data-tab="checkin">Gate</button>
+  <button class="tab-btn" data-tab="arrived">Arrived</button>
+  <button class="tab-btn" data-tab="pending">Pending</button>
+  <button class="tab-btn" data-tab="review">Review</button>
+  <button class="tab-btn" data-tab="import">Import</button>
+</nav>
+
+<!-- GATE / CHECK-IN TAB -->
+<main id="tab-checkin" class="tab active">
+  <div class="searchbox">
+    <input id="searchInput" type="search" placeholder="Search name / WhatsApp / reg ID" autocomplete="off">
+  </div>
+  <button id="scanBtn" class="btn secondary">📷 Scan QR</button>
+  <video id="scanVideo" playsinline muted hidden></video>
+  <div id="scanStatus" class="hint"></div>
+  <div id="results" class="results"></div>
+</main>
+
+<!-- ARRIVED TAB -->
+<main id="tab-arrived" class="tab">
+  <div id="arrivedList" class="results"></div>
+</main>
+
+<!-- PENDING TAB -->
+<main id="tab-pending" class="tab">
+  <div id="pendingList" class="results"></div>
+</main>
+
+<!-- MANUAL REVIEW TAB -->
+<main id="tab-review" class="tab">
+  <p class="hint">Registrations where the Entry Pass count and supplied names don't match. All named guests are imported; missing companions were NOT invented.</p>
+  <div id="reviewList" class="results"></div>
+</main>
+
+<!-- IMPORT TAB -->
+<main id="tab-import" class="tab">
+  <h2>Import Google Sheets CSV</h2>
+  <p class="hint">Google Sheets → File → Download → Comma Separated Values (.csv).<br>
+  Aadhaar columns are always ignored and never stored. Blank rows are skipped; valid rows without a timestamp are kept.</p>
+  <input type="file" id="csvFile" accept=".csv">
+  <button id="previewBtn" class="btn secondary">1️⃣ Preview import</button>
+  <div id="previewBox" hidden></div>
+  <label id="wipeRow" hidden class="wipe-label">
+    <input type="checkbox" id="wipeCheck"> Replace entire existing guest list (a backup is saved automatically)
+  </label>
+  <button id="confirmBtn" class="btn primary" hidden>2️⃣ Confirm import</button>
+  <div id="importResult" class="hint"></div>
+  <hr>
+  <a class="btn secondary" href="/api/export.csv">⬇️ Export attendance CSV</a>
+  <button id="resetAllBtn" class="btn warn small">Reset ALL check-ins (admin)</button>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
