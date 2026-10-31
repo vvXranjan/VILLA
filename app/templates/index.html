@@ -3,68 +3,340 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>VILLA — Diwali Gate Check-in</title>
+<meta name="theme-color" content="#FAF6EF">
+<title>VILLA — DESI DIWALI BLING · Gate Check-in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<header>
-  <div class="brand">🪔 VILLA — Diwali Gate Check-in</div>
-  <div id="statsBar" class="stats">Loading…</div>
-</header>
+<div class="shell">
 
-<nav>
-  <button class="tab-btn active" data-tab="checkin">Gate</button>
-  <button class="tab-btn" data-tab="arrived">Arrived</button>
-  <button class="tab-btn" data-tab="pending">Pending</button>
-  <button class="tab-btn" data-tab="review">Review</button>
-  <button class="tab-btn" data-tab="import">Import</button>
-</nav>
+  <!-- ============================ SIDEBAR (desktop) ============================ -->
+  <aside class="sidebar">
+    <div class="brand-block">
+      <svg class="diya" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 3.2c1.4 1.7 2.1 2.9 2.1 4a2.1 2.1 0 1 1-4.2 0c0-1.1.7-2.3 2.1-4Z" fill="#D49A45"/>
+        <path d="M4.5 13.2h15c0 3.6-3.4 6.5-7.5 6.5s-7.5-2.9-7.5-6.5Z" stroke="#762D35" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div class="wordmark">VILLA</div>
+        <div class="brand-sub">Desi Diwali Bling</div>
+      </div>
+    </div>
+    <div class="gold-line"></div>
 
-<!-- GATE / CHECK-IN TAB -->
-<main id="tab-checkin" class="tab active">
-  <div class="searchbox">
-    <input id="searchInput" type="search" placeholder="Search name / WhatsApp / reg ID" autocomplete="off">
+    <nav class="side-nav" aria-label="Main">
+      <div class="nav-label">Menu</div>
+      <button class="nav-item active" data-tab="overview">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+        Overview
+      </button>
+      <button class="nav-item" data-tab="checkin">
+        <svg viewBox="0 0 24 24"><path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><circle cx="14.2" cy="12.2" r="1.1" fill="currentColor" stroke="none"/></svg>
+        Gate Check-in
+      </button>
+      <button class="nav-item" data-tab="arrived">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.3 12.4 2.5 2.5 4.7-5.2"/></svg>
+        Arrived Guests
+      </button>
+      <button class="nav-item" data-tab="pending">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.2V12l3.2 2"/></svg>
+        Pending Guests
+      </button>
+      <button class="nav-item" data-tab="review">
+        <svg viewBox="0 0 24 24"><path d="M10.3 3.8 2.2 17.9A1.9 1.9 0 0 0 3.9 20.8h16.2a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0Z"/><path d="M12 9.5v4"/><path d="M12 17h.01"/></svg>
+        Payment Review
+      </button>
+      <button class="nav-item" data-tab="import">
+        <svg viewBox="0 0 24 24"><path d="M21 15.5v3.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3.3"/><path d="m7.5 9.5 4.5-4.5 4.5 4.5"/><path d="M12 5v11"/></svg>
+        Import Registrations
+      </button>
+      <button class="nav-item" data-tab="export">
+        <svg viewBox="0 0 24 24"><path d="M21 15.5v3.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3.3"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M12 15V4"/></svg>
+        Attendance Export
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <div class="gold-line"></div>
+      <div class="side-event">31 October 2026</div>
+      <div class="side-note">Private event · Local server · No cloud</div>
+    </div>
+  </aside>
+
+  <!-- =============================== MAIN COLUMN =============================== -->
+  <div class="main">
+
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="topbar-mark">VILLA</span>
+        <span class="topbar-divider" aria-hidden="true"></span>
+        <span class="topbar-event">
+          <strong>DESI DIWALI BLING</strong>
+          <em>Guest Management &amp; Gate Check-in</em>
+        </span>
+      </div>
+      <div class="topbar-right">
+        <span class="event-date">31 Oct 2026</span>
+        <span class="gate-live" id="gateLive"><span class="live-dot" aria-hidden="true"></span><span id="gateLiveText">Connecting…</span></span>
+      </div>
+      <div class="gold-rule" aria-hidden="true"></div>
+    </header>
+
+    <main class="content">
+
+      <!-- ============================= OVERVIEW ============================= -->
+      <section id="tab-overview" class="tab active">
+        <div class="page-head">
+          <div>
+            <h1>Overview</h1>
+            <div id="statsBar" class="stats">Loading…</div>
+          </div>
+          <button class="btn primary gate-cta" id="openGateBtn">Open Gate Check-in →</button>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi accent-total">
+            <div class="kpi-icon">
+              <svg viewBox="0 0 24 24"><path d="M16 19v-1.6a3.4 3.4 0 0 0-3.4-3.4H6.4A3.4 3.4 0 0 0 3 17.4V19"/><circle cx="9.5" cy="7.5" r="3.5"/><path d="M21 19v-1.6a3.4 3.4 0 0 0-2.6-3.3"/><path d="M15.5 4.2a3.5 3.5 0 0 1 0 6.6"/></svg>
+            </div>
+            <div class="kpi-body">
+              <div class="kpi-num" id="kpiTotal">—</div>
+              <div class="kpi-label">Total Guests</div>
+            </div>
+          </div>
+          <div class="kpi accent-paid">
+            <div class="kpi-icon">
+              <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 10v4M18 10v4"/></svg>
+            </div>
+            <div class="kpi-body">
+              <div class="kpi-num" id="kpiPaid">—</div>
+              <div class="kpi-label">Paid Guests</div>
+            </div>
+          </div>
+          <div class="kpi accent-checked">
+            <div class="kpi-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.3 12.4 2.5 2.5 4.7-5.2"/></svg>
+            </div>
+            <div class="kpi-body">
+              <div class="kpi-num" id="kpiChecked">—</div>
+              <div class="kpi-label">Checked In</div>
+            </div>
+          </div>
+          <div class="kpi accent-pending">
+            <div class="kpi-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.2V12l3.2 2"/></svg>
+            </div>
+            <div class="kpi-body">
+              <div class="kpi-num" id="kpiPending">—</div>
+              <div class="kpi-label">Pending Arrivals</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Payment overview</h2>
+              <span class="panel-note">Guests by payment status</span>
+            </div>
+            <div class="paybar" role="img" aria-label="Payment status distribution">
+              <span class="seg" id="barPaid"></span>
+              <span class="seg" id="barUnpaid"></span>
+              <span class="seg" id="barReview"></span>
+            </div>
+            <div class="pay-legend">
+              <div class="leg"><span class="dot d-paid"></span>Paid <b id="legPaid">—</b></div>
+              <div class="leg"><span class="dot d-unpaid"></span>Unpaid <b id="legUnpaid">—</b></div>
+              <div class="leg"><span class="dot d-review"></span>Under review <b id="legReview">—</b></div>
+            </div>
+            <div class="panel-foot" id="payNote">Only PAID guests can be checked in at the gate.</div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Gate activity</h2>
+              <span class="panel-note">Most recent check-ins</span>
+            </div>
+            <div class="act" id="activityList"><div class="empty">Loading activity…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================== GATE CHECK-IN =========================== -->
+      <section id="tab-checkin" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Gate Check-in</h1>
+            <p class="sub">Search by guest name, WhatsApp number or registration ID.</p>
+          </div>
+        </div>
+
+        <div class="gate-search">
+          <svg class="search-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <input id="searchInput" type="search" placeholder="e.g. Ayushi, 9672133228, REG-004" autocomplete="off" enterkeyhint="search">
+        </div>
+
+        <div class="gate-actions">
+          <button id="scanBtn" class="btn secondary qr-btn">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM20 14h1M14 20h3M20 17v4"/></svg>
+            Scan QR code
+          </button>
+        </div>
+        <video id="scanVideo" playsinline muted hidden></video>
+        <div id="scanStatus" class="hint"></div>
+
+        <div id="results" class="results"></div>
+      </section>
+
+      <!-- ============================ ARRIVED ============================ -->
+      <section id="tab-arrived" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Arrived Guests</h1>
+            <p class="sub">Everyone who has been checked in at the gate.</p>
+          </div>
+        </div>
+        <div class="list-search">
+          <svg class="search-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <input id="arrivedSearch" type="search" placeholder="Filter arrived guests…" autocomplete="off">
+        </div>
+        <div id="arrivedList" class="results"></div>
+      </section>
+
+      <!-- ============================ PENDING ============================ -->
+      <section id="tab-pending" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Pending Guests</h1>
+            <p class="sub">Registered guests who have not arrived yet.</p>
+          </div>
+        </div>
+        <div class="list-search">
+          <svg class="search-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <input id="pendingSearch" type="search" placeholder="Filter pending guests…" autocomplete="off">
+        </div>
+        <div id="pendingList" class="results"></div>
+      </section>
+
+      <!-- ========================== PAYMENT REVIEW ========================== -->
+      <section id="tab-review" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Payment Review</h1>
+            <p class="sub">Unpaid and unverified payments are blocked at the gate. Name / pass mismatches need manual verification — companions are never invented.</p>
+          </div>
+        </div>
+        <div id="reviewList" class="results"></div>
+      </section>
+
+      <!-- ============================== IMPORT ============================== -->
+      <section id="tab-import" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Import Registrations</h1>
+            <p class="sub">Google Sheets → File → Download → Comma Separated Values (.csv)</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Upload guest list</h2>
+            <span class="panel-note">Preview first · confirm to import</span>
+          </div>
+
+          <div class="upload-zone">
+            <svg viewBox="0 0 24 24"><path d="M21 15.5v3.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3.3"/><path d="m7.5 9.5 4.5-4.5 4.5 4.5"/><path d="M12 5v11"/></svg>
+            <p class="upload-title">Choose the responses CSV</p>
+            <p class="upload-note">Aadhaar columns are always ignored and never stored. Blank rows are skipped; valid rows without a timestamp are kept.</p>
+            <input type="file" id="csvFile" accept=".csv">
+          </div>
+
+          <div class="import-actions">
+            <button id="previewBtn" class="btn secondary">1 · Preview import</button>
+            <label id="wipeRow" hidden class="wipe-label">
+              <input type="checkbox" id="wipeCheck"> Replace entire existing guest list (a backup is saved automatically)
+            </label>
+            <button id="confirmBtn" class="btn primary" hidden>2 · Confirm import</button>
+          </div>
+
+          <div id="previewBox" hidden></div>
+          <div id="importResult" class="hint"></div>
+        </div>
+      </section>
+
+      <!-- ============================== EXPORT ============================== -->
+      <section id="tab-export" class="tab">
+        <div class="page-head">
+          <div>
+            <h1>Attendance Export</h1>
+            <p class="sub">Download the final attendance sheet as CSV.</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Attendance CSV</h2>
+            <span class="panel-note">One row per individual guest</span>
+          </div>
+          <ul class="export-list">
+            <li>Registration ID, individual name, entry pass type</li>
+            <li>WhatsApp number and email of the registration</li>
+            <li>Payment status and manual-review flag</li>
+            <li>Check-in timestamp (UTC) — blank if not arrived</li>
+          </ul>
+          <a class="btn primary" href="/api/export.csv">Download attendance.csv</a>
+          <div class="panel-foot">No Aadhaar data is ever included in exports.</div>
+        </div>
+
+        <div class="panel danger-zone">
+          <div class="panel-head">
+            <h2>Admin</h2>
+            <span class="panel-note">Explicit actions only</span>
+          </div>
+          <button id="resetAllBtn" class="btn warn small">Reset ALL check-ins</button>
+          <div class="panel-foot">Clears every check-in timestamp. Guest and payment data is kept.</div>
+        </div>
+      </section>
+
+    </main>
   </div>
-  <button id="scanBtn" class="btn secondary">📷 Scan QR</button>
-  <video id="scanVideo" playsinline muted hidden></video>
-  <div id="scanStatus" class="hint"></div>
-  <div id="results" class="results"></div>
-</main>
+</div>
 
-<!-- ARRIVED TAB -->
-<main id="tab-arrived" class="tab">
-  <div id="arrivedList" class="results"></div>
-</main>
-
-<!-- PENDING TAB -->
-<main id="tab-pending" class="tab">
-  <div id="pendingList" class="results"></div>
-</main>
-
-<!-- MANUAL REVIEW TAB -->
-<main id="tab-review" class="tab">
-  <p class="hint">Registrations where the Entry Pass count and supplied names don't match. All named guests are imported; missing companions were NOT invented.</p>
-  <div id="reviewList" class="results"></div>
-</main>
-
-<!-- IMPORT TAB -->
-<main id="tab-import" class="tab">
-  <h2>Import Google Sheets CSV</h2>
-  <p class="hint">Google Sheets → File → Download → Comma Separated Values (.csv).<br>
-  Aadhaar columns are always ignored and never stored. Blank rows are skipped; valid rows without a timestamp are kept.</p>
-  <input type="file" id="csvFile" accept=".csv">
-  <button id="previewBtn" class="btn secondary">1️⃣ Preview import</button>
-  <div id="previewBox" hidden></div>
-  <label id="wipeRow" hidden class="wipe-label">
-    <input type="checkbox" id="wipeCheck"> Replace entire existing guest list (a backup is saved automatically)
-  </label>
-  <button id="confirmBtn" class="btn primary" hidden>2️⃣ Confirm import</button>
-  <div id="importResult" class="hint"></div>
-  <hr>
-  <a class="btn secondary" href="/api/export.csv">⬇️ Export attendance CSV</a>
-  <button id="resetAllBtn" class="btn warn small">Reset ALL check-ins (admin)</button>
-</main>
+<!-- ========================== BOTTOM NAV (mobile) ========================== -->
+<nav class="bottom-nav" aria-label="Main (mobile)">
+  <button class="bnav-item active" data-tab="overview">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+    <span>Overview</span>
+  </button>
+  <button class="bnav-item" data-tab="checkin">
+    <svg viewBox="0 0 24 24"><path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><circle cx="14.2" cy="12.2" r="1.1" fill="currentColor" stroke="none"/></svg>
+    <span>Gate</span>
+  </button>
+  <button class="bnav-item" data-tab="arrived">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.3 12.4 2.5 2.5 4.7-5.2"/></svg>
+    <span>Arrived</span>
+  </button>
+  <button class="bnav-item" data-tab="pending">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.2V12l3.2 2"/></svg>
+    <span>Pending</span>
+  </button>
+  <button class="bnav-item" data-tab="review">
+    <svg viewBox="0 0 24 24"><path d="M10.3 3.8 2.2 17.9A1.9 1.9 0 0 0 3.9 20.8h16.2a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0Z"/><path d="M12 9.5v4"/><path d="M12 17h.01"/></svg>
+    <span>Review</span>
+  </button>
+  <button class="bnav-item" data-tab="import">
+    <svg viewBox="0 0 24 24"><path d="M21 15.5v3.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3.3"/><path d="m7.5 9.5 4.5-4.5 4.5 4.5"/><path d="M12 5v11"/></svg>
+    <span>Import</span>
+  </button>
+  <button class="bnav-item" data-tab="export">
+    <svg viewBox="0 0 24 24"><path d="M21 15.5v3.3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3.3"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M12 15V4"/></svg>
+    <span>Export</span>
+  </button>
+</nav>
 
 <div id="toast" class="toast" hidden></div>
 

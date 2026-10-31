@@ -1,33 +1,78 @@
 const $ = (s) => document.querySelector(s);
 let stagedToken = null;
 let scanStream = null;
+let arrivedData = [];
+let pendingData = [];
 
-/* ---------- tabs ---------- */
-document.querySelectorAll(".tab-btn").forEach((b) => {
-  b.onclick = () => {
-    document.querySelectorAll(".tab-btn").forEach((x) => x.classList.remove("active"));
-    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active");
-    $("#tab-" + b.dataset.tab).classList.add("active");
-    if (b.dataset.tab === "arrived") loadArrived();
-    if (b.dataset.tab === "pending") loadPending();
-    if (b.dataset.tab === "review") loadReview();
-    if (b.dataset.tab === "checkin") $("#searchInput").focus();
-  };
-});
+/* =========================== navigation =========================== */
 
-/* ---------- stats ---------- */
-async function loadStats() {
-  const s = await (await fetch("/api/stats")).json();
-  $("#statsBar").innerHTML =
-    `Guests <b>${s.total}</b> · Regs <b>${s.registrations}</b> · ` +
-    `<span class="s-paid">Paid ${s.paid}</span> · <span class="s-unpaid">Unpaid ${s.unpaid}</span> · ` +
-    `<span class="s-review">Review ${s.under_review}</span> · ` +
-    `✅ <b>${s.checked_in}</b> in · Paid left <b>${s.paid_remaining}</b> · <b>${s.pct}%</b>`;
+function showTab(name) {
+  document.querySelectorAll("[data-tab]").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === name)
+  );
+  document.querySelectorAll(".tab").forEach((p) =>
+    p.classList.toggle("active", p.id === "tab-" + name)
+  );
+  if (name === "overview") loadActivity();
+  if (name === "arrived") loadArrived();
+  if (name === "pending") loadPending();
+  if (name === "review") loadReview();
+  if (name === "checkin") setTimeout(() => $("#searchInput").focus(), 50);
 }
+
+document.querySelectorAll("[data-tab]").forEach((b) =>
+  b.addEventListener("click", () => showTab(b.dataset.tab))
+);
+
+const openGateBtn = $("#openGateBtn");
+if (openGateBtn) openGateBtn.onclick = () => showTab("checkin");
+
+/* ============================== stats ============================== */
+
+async function loadStats() {
+  try {
+    const s = await (await fetch("/api/stats")).json();
+
+    setText("#kpiTotal", s.total);
+    setText("#kpiPaid", s.paid);
+    setText("#kpiChecked", s.checked_in);
+    setText("#kpiPending", s.pending_total);
+
+    const total = s.total || 0;
+    const pct = (n) => (total ? (100 * n) / total : 0);
+    $("#barPaid").style.width = pct(s.paid) + "%";
+    $("#barUnpaid").style.width = pct(s.unpaid) + "%";
+    $("#barReview").style.width = pct(s.under_review) + "%";
+    setText("#legPaid", s.paid);
+    setText("#legUnpaid", s.unpaid);
+    setText("#legReview", s.under_review);
+
+    $("#statsBar").innerHTML =
+      `${s.registrations} registrations · <b>${s.total}</b> guests · ` +
+      `<span class="s-paid">${s.paid} paid</span> · ` +
+      `<span class="s-unpaid">${s.unpaid} unpaid</span> · ` +
+      `<span class="s-review">${s.under_review} under review</span> · ` +
+      `<b>${s.checked_in}</b> checked in · <b>${s.paid_remaining}</b> paid remaining`;
+
+    const live = $("#gateLive");
+    live.classList.remove("offline");
+    $("#gateLiveText").textContent = "Gate live";
+  } catch (e) {
+    const live = $("#gateLive");
+    live.classList.add("offline");
+    $("#gateLiveText").textContent = "Server offline";
+  }
+}
+
+function setText(sel, val) {
+  const el = $(sel);
+  if (el) el.textContent = val;
+}
+
 setInterval(loadStats, 5000);
 
-/* ---------- toast ---------- */
+/* =============================== toast =============================== */
+
 function toast(msg, kind = "ok") {
   const t = $("#toast");
   t.textContent = msg;
@@ -47,7 +92,39 @@ function payBadge(status) {
   return '<span class="badge unpaid">UNPAID</span>';
 }
 
-/* ---------- search (grouped by registration) ---------- */
+/* ===================== gate activity (overview) ===================== */
+
+async function loadActivity() {
+  const box = $("#activityList");
+  if (!box) return;
+  try {
+    const res = await (await fetch("/api/list/arrived")).json();
+    const recent = res.slice().reverse().slice(0, 8);
+    if (!recent.length) {
+      box.innerHTML = '<div class="empty">The gate is quiet — no check-ins yet.</div>';
+      return;
+    }
+    box.innerHTML =
+      `<div class="arow ahead"><span>Guest</span><span>Pass</span><span>Payment</span><span>Time</span><span>Status</span></div>` +
+      recent
+        .map(
+          (g) => `
+      <div class="arow">
+        <span class="a-guest"><span class="a-name">${esc(g.name)}</span><br><span class="a-sub">${esc(g.reg_id)}</span></span>
+        <span class="a-pass">${esc(g.entry_pass || "—")}</span>
+        <span class="a-pay">${payBadge(g.payment_status)}</span>
+        <span class="a-time">${esc((g.checked_in_at || "").slice(11, 16))} UTC</span>
+        <span class="a-status">Checked in ✓</span>
+      </div>`
+        )
+        .join("");
+  } catch (e) {
+    box.innerHTML = '<div class="empty">Activity unavailable.</div>';
+  }
+}
+
+/* ====================== search (grouped by reg) ====================== */
+
 const searchInput = $("#searchInput");
 let searchTimer;
 searchInput.oninput = () => {
@@ -62,7 +139,7 @@ async function doSearch() {
   if (!q) return;
   const regs = await (await fetch("/api/registrations?q=" + encodeURIComponent(q))).json();
   if (!regs.length) {
-    box.innerHTML = '<div class="hint">No guests found.</div>';
+    box.innerHTML = '<div class="reg-card"><div class="empty">No guests found for “' + esc(q) + '”.</div></div>';
     return;
   }
   regs.forEach((r) => box.appendChild(regCard(r)));
@@ -73,35 +150,52 @@ function regCard(r) {
   card.className = "reg-card";
   const pass = r.entry_pass || "?";
   const inCount = r.members.filter((m) => m.checked_in_at).length;
+
   let head = `
     <div class="reg-head">
       <div>
-        <div class="reg-title">${esc(r.reg_id)} · ${esc(pass)} <span class="badge pass">${inCount}/${r.members.length} in</span></div>
-        <div class="meta">${esc(r.phone || "no phone")}${r.email ? " · " + esc(r.email) : ""}</div>
+        <div class="reg-title">
+          ${esc(r.reg_id)}
+          <span class="pass-chip">${esc(pass)}</span>
+          <span class="member-count">${inCount}/${r.members.length} entered</span>
+        </div>
+        <div class="reg-meta">${esc(r.phone || "no phone")}${r.email ? " · " + esc(r.email) : ""}</div>
       </div>
       <div>${payBadge(r.payment_status)}</div>
     </div>`;
   if (r.needs_review) {
     head += `<div class="review-flag">⚠ ${esc(r.review_reason)}</div>`;
   }
+
   let members = "";
   r.members.forEach((m) => {
     const checked = !!m.checked_in_at;
-    let btn;
+    let action;
     if (checked) {
-      btn = `<div class="member-status in">✔ ${esc(m.checked_in_at.slice(11, 16))} UTC</div>`;
+      action = `<div class="member-done">✓ ${esc(m.checked_in_at.slice(11, 16))} UTC</div>`;
     } else if (r.payment_status === "PAID") {
-      btn = `<button class="btn primary tiny" data-gid="${m.id}">CHECK IN</button>`;
+      action = `<button class="btn-checkin" data-gid="${m.id}">CHECK IN</button>`;
     } else {
-      btn = `<button class="btn danger tiny" disabled>Not paid</button>`;
+      action = `<button class="btn-blocked" disabled>${r.payment_status === "UNPAID" ? "Not paid — blocked" : "Unverified — blocked"}</button>`;
     }
+    const sub = checked
+      ? "Entry recorded"
+      : r.payment_status === "PAID"
+        ? "Ready to enter"
+        : r.payment_status === "UNPAID"
+          ? "Payment pending — entry blocked"
+          : "Payment unverified — entry blocked";
     members += `
       <div class="member${checked ? " checked" : ""}">
-        <div class="member-name">${checked ? "✔ " : "● "}${esc(m.name)}</div>
-        ${btn}
+        <div class="member-info">
+          <div class="member-name">${esc(m.name)}</div>
+          <div class="member-sub">${sub}</div>
+        </div>
+        ${action}
       </div>`;
   });
   card.innerHTML = head + `<div class="members">${members}</div>`;
+
   card.querySelectorAll("button[data-gid]").forEach((b) => {
     b.onclick = async () => {
       const res = await (await fetch(`/api/guests/${b.dataset.gid}/checkin`, { method: "POST" })).json();
@@ -117,9 +211,11 @@ function refreshSearchOrList() {
   if (searchInput.value.trim()) doSearch();
   else if ($("#tab-pending").classList.contains("active")) loadPending();
   else if ($("#tab-arrived").classList.contains("active")) loadArrived();
+  if ($("#tab-overview").classList.contains("active")) loadActivity();
 }
 
-/* ---------- QR resolve shows the whole registration ---------- */
+/* ====================== QR resolve → reg card ====================== */
+
 async function resolveToken(token) {
   try {
     const g = await (await fetch("/api/qr/" + encodeURIComponent(token))).json();
@@ -127,75 +223,161 @@ async function resolveToken(token) {
     const box = $("#results");
     box.innerHTML = "";
     if (regs.length) box.appendChild(regCard(regs[0]));
-    if (g.payment_status !== "PAID") toast("Payment not verified", "bad");
+    if (g.payment_status !== "PAID") toast("Payment not verified — entry blocked", "bad");
     else toast("QR valid — " + g.name, "ok");
   } catch {
     toast("INVALID QR TOKEN", "bad");
   }
 }
 
-/* ---------- lists ---------- */
+/* ============================ list screens ============================ */
+
 async function loadArrived() {
-  const res = await (await fetch("/api/list/arrived")).json();
-  $("#arrivedList").innerHTML = res.length
-    ? res
-        .map(
-          (g) => `
-      <div class="row checked">
-        <div>
-          <div class="name">${esc(g.name)}</div>
-          <div class="meta">${esc(g.reg_id)} · ${esc(g.entry_pass || "")} · ${esc(g.phone || "")}</div>
-        </div>
-        <div class="badge in">✔ ${esc((g.checked_in_at || "").slice(11, 16))} UTC</div>
+  arrivedData = await (await fetch("/api/list/arrived")).json();
+  renderArrived();
+}
+
+function renderArrived() {
+  const q = ($("#arrivedSearch").value || "").trim().toLowerCase();
+  const rows = arrivedData.filter(
+    (g) =>
+      !q ||
+      g.name.toLowerCase().includes(q) ||
+      (g.reg_id || "").toLowerCase().includes(q) ||
+      (g.phone || "").includes(q)
+  );
+  $("#arrivedList").innerHTML = rows.length
+    ? `<div class="dtable">
+        <div class="trow dthead"><span>Guest</span><span>Pass</span><span>Payment</span><span>Checked in</span></div>
+        ${rows
+          .map(
+            (g) => `
+        <div class="trow">
+          <span class="c-guest">
+            <span class="g-name">${esc(g.name)}</span>
+            <span class="g-sub">${esc(g.reg_id)} · ${esc(g.phone || "no phone")}</span>
+          </span>
+          <span class="c-pass">${esc(g.entry_pass || "—")}</span>
+          <span class="c-pay">${payBadge(g.payment_status)}</span>
+          <span class="c-time">${esc((g.checked_in_at || "").slice(11, 16))} UTC</span>
+        </div>`
+          )
+          .join("")}
       </div>`
-        )
-        .join("")
-    : '<div class="hint">No one has checked in yet.</div>';
+    : '<div class="panel"><div class="empty">' + (arrivedData.length ? "No arrivals match that filter." : "No one has checked in yet.") + "</div></div>";
 }
 
 async function loadPending() {
-  const res = await (await fetch("/api/list/pending")).json();
-  $("#pendingList").innerHTML = res.length
-    ? res
-        .map(
-          (g) => `
-      <div class="row" onclick="goSearch('${esc(g.name).replace(/'/g, "\\'")}')">
-        <div>
-          <div class="name">${esc(g.name)}</div>
-          <div class="meta">${esc(g.reg_id)} · ${esc(g.entry_pass || "")} · ${esc(g.phone || "")}</div>
-        </div>
-        ${payBadge(g.payment_status)}
-      </div>`
-        )
-        .join("")
-    : '<div class="hint">Everyone has arrived! 🎉</div>';
+  pendingData = await (await fetch("/api/list/pending")).json();
+  renderPending();
 }
 
+function renderPending() {
+  const q = ($("#pendingSearch").value || "").trim().toLowerCase();
+  const rows = pendingData.filter(
+    (g) =>
+      !q ||
+      g.name.toLowerCase().includes(q) ||
+      (g.reg_id || "").toLowerCase().includes(q) ||
+      (g.phone || "").includes(q)
+  );
+  $("#pendingList").innerHTML = rows.length
+    ? `<div class="dtable">
+        <div class="trow dthead"><span>Guest</span><span>Pass</span><span>Payment</span><span>Status</span></div>
+        ${rows
+          .map(
+            (g) => `
+        <div class="trow" data-search="${esc(g.name).replace(/"/g, "&quot;")}" style="cursor:pointer">
+          <span class="c-guest">
+            <span class="g-name">${esc(g.name)}</span>
+            <span class="g-sub">${esc(g.reg_id)} · ${esc(g.phone || "no phone")}</span>
+          </span>
+          <span class="c-pass">${esc(g.entry_pass || "—")}</span>
+          <span class="c-pay">${payBadge(g.payment_status)}</span>
+          <span class="c-time">Not arrived</span>
+        </div>`
+          )
+          .join("")}
+      </div>`
+    : '<div class="panel"><div class="empty">' + (pendingData.length ? "No pending guests match that filter." : "Everyone has arrived!") + "</div></div>";
+
+  $("#pendingList").querySelectorAll("[data-search]").forEach((el) => {
+    el.onclick = () => goSearch(el.dataset.search);
+  });
+}
+
+$("#arrivedSearch").oninput = renderArrived;
+$("#pendingSearch").oninput = renderPending;
+
+/* ====================== payment review screen ====================== */
+
 async function loadReview() {
-  const res = await (await fetch("/api/list/manual_review")).json();
-  $("#reviewList").innerHTML = res.length
-    ? res
+  const box = $("#reviewList");
+  try {
+    const [manual, regs] = await Promise.all([
+      (await fetch("/api/list/manual_review")).json(),
+      (await fetch("/api/registrations?q=")).json(),
+    ]);
+    const unpaid = regs.filter((r) => r.payment_status === "UNPAID");
+    const unknown = regs.filter((r) => r.payment_status === "UNDER REVIEW");
+    const mismatch = manual;
+
+    let html = "";
+    const group = (title, list, cls, note) => {
+      if (!list.length) return "";
+      let h = `<div class="group-head">${title} — ${list.length}</div>`;
+      h += list
         .map(
           (r) => `
-      <div class="row" onclick="goSearch('${esc(r.reg_id)}')">
-        <div>
-          <div class="name">${esc(r.reg_id)} · ${esc(r.entry_pass)}</div>
-          <div class="meta">${esc(r.review_reason)} — ${esc(r.members.map((m) => m.name).join(", "))}</div>
-        </div>
-        ${payBadge(r.payment_status)}
-      </div>`
+        <div class="row ${cls}" data-reg="${esc(r.reg_id)}">
+          <div>
+            <div class="name">${esc(r.reg_id)} · ${esc(r.entry_pass || "?")}${r.members.length > 1 ? ` · ${r.members.length} guests` : ""}</div>
+            <div class="meta">${esc(note(r))}</div>
+          </div>
+          ${payBadge(r.payment_status)}
+        </div>`
         )
-        .join("")
-    : '<div class="hint">No registrations need manual review. ✅</div>';
+        .join("");
+      return h;
+    };
+
+    html += group(
+      "Unpaid — entry blocked",
+      unpaid,
+      "blocked",
+      (r) => r.members.map((m) => m.name).join(", ")
+    );
+    html += group(
+      "Unknown payment — entry blocked",
+      unknown,
+      "blocked",
+      (r) => r.members.map((m) => m.name).join(", ")
+    );
+    html += group(
+      "Name list mismatch — verify at gate",
+      mismatch,
+      "",
+      (r) => r.review_reason + " — " + r.members.map((m) => m.name).join(", ")
+    );
+
+    box.innerHTML = html || '<div class="panel"><div class="empty">Nothing needs review — all registrations are paid and complete. ✓</div></div>';
+
+    box.querySelectorAll("[data-reg]").forEach((el) => {
+      el.onclick = () => goSearch(el.dataset.reg);
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="panel"><div class="empty">Review list unavailable.</div></div>';
+  }
 }
 
 window.goSearch = (q) => {
-  document.querySelector('[data-tab="checkin"]').click();
+  showTab("checkin");
   searchInput.value = q;
   doSearch();
 };
 
-/* ---------- import: preview → confirm ---------- */
+/* ====================== import: preview → confirm ====================== */
+
 $("#previewBtn").onclick = async () => {
   const f = $("#csvFile").files[0];
   if (!f) return toast("Choose a CSV file first", "warn");
@@ -214,7 +396,7 @@ $("#previewBtn").onclick = async () => {
     .join("");
   $("#previewBox").hidden = false;
   $("#previewBox").innerHTML = `
-    <h3>Preview: ${esc(p.file_name)}</h3>
+    <h3>Preview — ${esc(p.file_name)}</h3>
     <table class="pv">
       <tr><td>Registration rows (non-empty)</td><td><b>${p.registration_rows}</b></td></tr>
       <tr><td>Blank rows skipped</td><td><b>${p.blank_rows_skipped}</b></td></tr>
@@ -234,6 +416,7 @@ $("#previewBtn").onclick = async () => {
   `;
   $("#wipeRow").hidden = false;
   $("#confirmBtn").hidden = false;
+  $("#previewBox").scrollIntoView({ behavior: "smooth", block: "start" });
 };
 
 $("#confirmBtn").onclick = async () => {
@@ -265,13 +448,14 @@ $("#resetAllBtn").onclick = async () => {
   loadStats();
 };
 
-/* ---------- QR scanning ---------- */
+/* ============================ QR scanning ============================ */
+
 $("#scanBtn").onclick = async () => {
   const video = $("#scanVideo");
   const status = $("#scanStatus");
   if (scanStream) return stopScan();
   if (!("BarcodeDetector" in window)) {
-    status.textContent = "QR scanning not supported on this browser — use manual search below.";
+    status.textContent = "QR scanning not supported on this browser — use manual search above.";
     return;
   }
   try {
@@ -280,7 +464,7 @@ $("#scanBtn").onclick = async () => {
     video.hidden = false;
     await video.play();
     status.textContent = "Point camera at guest QR code…";
-    $("#scanBtn").textContent = "Stop scanning";
+    $("#scanBtn").innerHTML = "Stop scanning";
     const detector = new BarcodeDetector({ formats: ["qr_code"] });
     const tick = async () => {
       if (!scanStream) return;
@@ -307,10 +491,11 @@ function stopScan() {
   cancelAnimationFrame(scanStream._t);
   scanStream = null;
   $("#scanVideo").hidden = true;
-  $("#scanBtn").textContent = "📷 Scan QR";
+  $("#scanBtn").innerHTML =
+    '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM20 14h1M14 20h3M20 17v4"/></svg> Scan QR code';
   $("#scanStatus").textContent = "";
 }
 
-/* ---------- init ---------- */
+/* =============================== init =============================== */
 loadStats();
 searchInput.focus();
