@@ -48,11 +48,15 @@ async function loadStats() {
     setText("#legReview", s.under_review);
 
     $("#statsBar").innerHTML =
-      `${s.registrations} registrations · <b>${s.total}</b> guests · ` +
+      `${s.registrations} registrations · <b>${s.total}</b> named guests · ` +
+      `capacity <b>${s.expected_capacity}</b> · ` +
       `<span class="s-paid">${s.paid} paid</span> · ` +
       `<span class="s-unpaid">${s.unpaid} unpaid</span> · ` +
       `<span class="s-review">${s.under_review} under review</span> · ` +
-      `<b>${s.checked_in}</b> checked in · <b>${s.paid_remaining}</b> paid remaining`;
+      `<b>${s.checked_in}</b> checked in · <b>${s.paid_remaining}</b> paid remaining` +
+      (s.incomplete_groups
+        ? ` · <span class="s-review">${s.incomplete_groups} incomplete groups</span>`
+        : "");
 
     const live = $("#gateLive");
     live.classList.remove("offline");
@@ -164,7 +168,16 @@ function regCard(r) {
       <div>${payBadge(r.payment_status)}</div>
     </div>`;
   if (r.needs_review) {
-    head += `<div class="review-flag">⚠ ${esc(r.review_reason)}</div>`;
+    const expected = r.expected_capacity || r.members.length;
+    const named = r.members.length;
+    const missing = Math.max(0, expected - named);
+    head += `
+      <div class="review-flag">
+        ⚠ <strong>INCOMPLETE GROUP DETAILS</strong> — ${esc(pass)} expects ${expected}, ${named} named
+        ${missing ? `· ${missing} companion name(s) not supplied` : ""}
+        <span class="review-sub">Named guests can still check in if PAID. Companions were never invented.</span>
+        <button class="btn secondary tiny add-companion" data-reg="${esc(r.reg_id)}">+ Add companion name (admin)</button>
+      </div>`;
   }
 
   let members = "";
@@ -202,6 +215,28 @@ function regCard(r) {
       toast(res.message, res.ok ? "ok" : "bad");
       loadStats();
       refreshSearchOrList();
+    };
+  });
+  card.querySelectorAll("button.add-companion").forEach((b) => {
+    b.onclick = async () => {
+      const n = prompt(`Add companion name for ${b.dataset.reg}\n(leave blank to cancel — companions are never invented):`);
+      if (!n || !n.trim()) return;
+      try {
+        const resp = await fetch(
+          `/api/admin/add_companion?reg_id=${encodeURIComponent(b.dataset.reg)}&name=${encodeURIComponent(n.trim())}`,
+          { method: "POST" }
+        );
+        const res = await resp.json();
+        if (resp.ok && res.ok) {
+          toast(`Added: ${res.added.join(", ")} (admin-entered)`, "ok");
+          loadStats();
+          refreshSearchOrList();
+        } else {
+          toast(res.detail || "Could not add name", "bad");
+        }
+      } catch (e) {
+        toast("Could not add companion", "bad");
+      }
     };
   });
   return card;
@@ -315,15 +350,15 @@ async function loadReview() {
   const box = $("#reviewList");
   try {
     const [manual, regs] = await Promise.all([
-      (await fetch("/api/list/manual_review")).json(),
-      (await fetch("/api/registrations?q=")).json(),
+      fetch("/api/list/manual_review").then((r) => r.json()),
+      fetch("/api/registrations?q=").then((r) => r.json()),
     ]);
     const unpaid = regs.filter((r) => r.payment_status === "UNPAID");
     const unknown = regs.filter((r) => r.payment_status === "UNDER REVIEW");
     const mismatch = manual;
 
     let html = "";
-    const group = (title, list, cls, note) => {
+    const group = (title, list, cls, note, showAdd) => {
       if (!list.length) return "";
       let h = `<div class="group-head">${title} — ${list.length}</div>`;
       h += list
@@ -334,7 +369,14 @@ async function loadReview() {
             <div class="name">${esc(r.reg_id)} · ${esc(r.entry_pass || "?")}${r.members.length > 1 ? ` · ${r.members.length} guests` : ""}</div>
             <div class="meta">${esc(note(r))}</div>
           </div>
-          ${payBadge(r.payment_status)}
+          <div class="row-right">
+            ${payBadge(r.payment_status)}
+            ${
+              showAdd && r.expected_capacity > r.named_count
+                ? `<button class="link-add" data-add="${esc(r.reg_id)}">+ add companion</button>`
+                : ""
+            }
+          </div>
         </div>`
         )
         .join("");
@@ -354,16 +396,41 @@ async function loadReview() {
       (r) => r.members.map((m) => m.name).join(", ")
     );
     html += group(
-      "Name list mismatch — verify at gate",
+      "Incomplete group details — named guests can still enter if paid",
       mismatch,
       "",
-      (r) => r.review_reason + " — " + r.members.map((m) => m.name).join(", ")
+      (r) => r.review_reason + " — " + r.members.map((m) => m.name).join(", "),
+      true
     );
 
     box.innerHTML = html || '<div class="panel"><div class="empty">Nothing needs review — all registrations are paid and complete. ✓</div></div>';
 
     box.querySelectorAll("[data-reg]").forEach((el) => {
       el.onclick = () => goSearch(el.dataset.reg);
+    });
+    box.querySelectorAll("[data-add]").forEach((b) => {
+      b.onclick = async (ev) => {
+        ev.stopPropagation();
+        const regId = b.dataset.add;
+        const n = prompt(`Add companion name for ${regId} (never invented automatically):`);
+        if (!n || !n.trim()) return;
+        try {
+          const resp = await fetch(
+            `/api/admin/add_companion?reg_id=${encodeURIComponent(regId)}&name=${encodeURIComponent(n.trim())}`,
+            { method: "POST" }
+          );
+          const res = await resp.json();
+          if (resp.ok && res.ok) {
+            toast(`Added: ${res.added.join(", ")} (admin-entered)`, "ok");
+            loadStats();
+            loadReview();
+          } else {
+            toast(res.detail || "Could not add name", "bad");
+          }
+        } catch (e) {
+          toast("Could not add companion", "bad");
+        }
+      };
     });
   } catch (e) {
     box.innerHTML = '<div class="panel"><div class="empty">Review list unavailable.</div></div>';
@@ -401,12 +468,13 @@ $("#previewBtn").onclick = async () => {
       <tr><td>Registration rows (non-empty)</td><td><b>${p.registration_rows}</b></td></tr>
       <tr><td>Blank rows skipped</td><td><b>${p.blank_rows_skipped}</b></td></tr>
       <tr><td>Individual named guests</td><td><b>${p.individual_guests}</b></td></tr>
+      <tr><td>Expected pass capacity</td><td><b>${p.expected_capacity}</b></td></tr>
       <tr><td>Solo / Couple / Duo / Trio</td><td><b>${p.solo} / ${p.couple} / ${p.duo} / ${p.trio}</b></td></tr>
       <tr><td>Other pass types</td><td><b>${p.other_pass}</b></td></tr>
       <tr><td>Paid registrations</td><td><b class="s-paid">${p.paid_regs}</b></td></tr>
       <tr><td>Unpaid registrations</td><td><b class="s-unpaid">${p.unpaid_regs}</b></td></tr>
       <tr><td>Payment review registrations</td><td><b class="s-review">${p.review_regs}</b></td></tr>
-      <tr><td>Manual review (names ≠ pass count)</td><td><b>${p.manual_review_regs}</b></td></tr>
+      <tr><td>Incomplete group registrations</td><td><b>${p.incomplete_groups}</b></td></tr>
     </table>
     ${p.aadhaar_columns_ignored.length ? `<div class="hint">Aadhaar columns ignored: ${esc(p.aadhaar_columns_ignored.join(", "))} (never stored)</div>` : ""}
     ${p.duplicate_file_warning ? `<div class="review-flag">⚠ ${esc(p.duplicate_file_warning)}</div>` : ""}

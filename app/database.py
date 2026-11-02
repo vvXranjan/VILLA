@@ -1,138 +1,339 @@
-import sqlite3
+"""Database layer — dual-backend via SQLAlchemy.
+
+- DATABASE_URL unset      → local SQLite at data/party.db (existing venue workflow)
+- DATABASE_URL set (pg)   → PostgreSQL (Supabase in production, local PG for testing)
+
+Timestamps are stored as TEXT in "YYYY-MM-DD HH:MM:SS" UTC format on both
+backends (matches SQLite's datetime('now') output) so the UI, export CSV and
+check-in messages are byte-identical regardless of backend.
+"""
+import json
+import os
+import shutil
 import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "party.db"
-BACKUP_DIR = Path(__file__).resolve().parent.parent / "data" / "backups"
-DB_PATH.parent.mkdir(exist_ok=True)
-BACKUP_DIR.mkdir(exist_ok=True)
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 
-_lock = threading.Lock()
+ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = ROOT / "data" / "party.db"
+BACKUP_DIR = ROOT / "data" / "backups"
 
-GUEST_COLUMNS = {
-    "entry_pass": "TEXT DEFAULT ''",
-    "needs_review": "INTEGER DEFAULT 0",
-    "review_reason": "TEXT DEFAULT ''",
-}
-REGISTRATION_COLUMNS = {
-    "needs_review": "INTEGER DEFAULT 0",
-    "review_reason": "TEXT DEFAULT ''",
-}
+VILLA_SLUG = "villa-diwali-bling"
+VILLA_TITLE = "VILLA — Desi Diwali Bling"
+
+_lock = threading.RLock()  # reentrant: init_db holds it while calling get_engine()
+_engine: Engine | None = None
+_initialized = False
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+def utc_now_str() -> str:
+    """Same format as SQLite datetime('now'): UTC, second precision."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _ensure_columns(conn: sqlite3.Connection, table: str, cols: dict) -> None:
-    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-    for name, decl in cols.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-
-
-def _migrate_group_schema(conn: sqlite3.Connection) -> None:
-    """Old schema had `reg_id TEXT UNIQUE` on guests (one guest per registration).
-    Group support needs many guests sharing a reg_id — rebuild the table."""
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='guests'"
-    ).fetchone()
-    if not row or not row[0] or "reg_id TEXT UNIQUE" not in row[0]:
-        return
-    conn.executescript(
-        """
-        BEGIN;
-        CREATE TABLE guests_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reg_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            phone TEXT DEFAULT '',
-            email TEXT DEFAULT '',
-            payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
-            entry_pass TEXT DEFAULT '',
-            needs_review INTEGER DEFAULT 0,
-            review_reason TEXT DEFAULT '',
-            qr_token TEXT UNIQUE,
-            checked_in_at TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        INSERT INTO guests_new
-            (id, reg_id, name, phone, email, payment_status, qr_token, checked_in_at, created_at)
-            SELECT id, reg_id, name, phone, email, payment_status, qr_token, checked_in_at, created_at
-            FROM guests;
-        DROP TABLE guests;
-        ALTER TABLE guests_new RENAME TO guests;
-        CREATE INDEX idx_guests_name ON guests(name);
-        CREATE INDEX idx_guests_phone ON guests(phone);
-        CREATE INDEX idx_guests_reg ON guests(reg_id);
-        CREATE INDEX idx_guests_qr ON guests(qr_token);
-        CREATE UNIQUE INDEX idx_guests_reg_name ON guests(reg_id, name);
-        COMMIT;
-        """
+def _make_engine() -> Engine:
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        # Postgres (Supabase pooler-safe): no pooled/held connections.
+        return create_engine(url, poolclass=NullPool, pool_pre_ping=True)
+    DB_PATH.parent.mkdir(exist_ok=True)
+    BACKUP_DIR.mkdir(exist_ok=True)
+    eng = create_engine(
+        f"sqlite:///{DB_PATH}",
+        connect_args={"check_same_thread": False, "timeout": 5},
     )
+
+    @event.listens_for(eng, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return eng
+
+
+def get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        with _lock:
+            if _engine is None:
+                _engine = _make_engine()
+    return _engine
+
+
+def is_postgres() -> bool:
+    return get_engine().dialect.name == "postgresql"
+
+
+@contextmanager
+def get_conn():
+    """Connection context: commit on success, rollback on error, always close."""
+    if not _initialized:
+        init_db()  # lazy safety net (Vercel may not fire lifespan events)
+    conn = get_engine().connect()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+_POSTGRES_DDL = """
+CREATE TABLE IF NOT EXISTS registrations (
+    id SERIAL PRIMARY KEY,
+    reg_id TEXT UNIQUE NOT NULL,
+    entry_pass TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
+    needs_review INTEGER DEFAULT 0,
+    review_reason TEXT DEFAULT '',
+    expected_capacity INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS guests (
+    id SERIAL PRIMARY KEY,
+    reg_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    phone TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
+    entry_pass TEXT DEFAULT '',
+    needs_review INTEGER DEFAULT 0,
+    review_reason TEXT DEFAULT '',
+    added_by TEXT DEFAULT 'csv',
+    qr_token TEXT UNIQUE,
+    checked_in_at TEXT,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE INDEX IF NOT EXISTS idx_guests_name ON guests(name);
+CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests(phone);
+CREATE INDEX IF NOT EXISTS idx_guests_reg ON guests(reg_id);
+CREATE INDEX IF NOT EXISTS idx_guests_qr ON guests(qr_token);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_reg_name ON guests(reg_id, name);
+CREATE TABLE IF NOT EXISTS staged_imports (
+    token TEXT PRIMARY KEY,
+    file_hash TEXT NOT NULL,
+    file_name TEXT DEFAULT '',
+    payload TEXT NOT NULL,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS import_log (
+    id SERIAL PRIMARY KEY,
+    file_hash TEXT NOT NULL,
+    file_name TEXT DEFAULT '',
+    registrations INTEGER,
+    guests INTEGER,
+    imported_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS backup_snapshots (
+    id SERIAL PRIMARY KEY,
+    label TEXT NOT NULL,
+    guests_json TEXT NOT NULL,
+    registrations_json TEXT NOT NULL,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS events (
+    id SERIAL PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    poster_url TEXT DEFAULT '',
+    venue TEXT DEFAULT '',
+    city TEXT DEFAULT '',
+    starts_at TEXT DEFAULT '',
+    ends_at TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS ticket_types (
+    id SERIAL PRIMARY KEY,
+    event_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_inr INTEGER NOT NULL DEFAULT 0,
+    group_size INTEGER NOT NULL DEFAULT 1,
+    capacity INTEGER NOT NULL DEFAULT 0,
+    sold INTEGER NOT NULL DEFAULT 0,
+    sale_open INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS'),
+    UNIQUE (event_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
+CREATE INDEX IF NOT EXISTS idx_ticket_types_event ON ticket_types(event_id);
+"""
+
+_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS registrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reg_id TEXT UNIQUE NOT NULL,
+    entry_pass TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
+    needs_review INTEGER DEFAULT 0,
+    review_reason TEXT DEFAULT '',
+    expected_capacity INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS guests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reg_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    phone TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
+    entry_pass TEXT DEFAULT '',
+    needs_review INTEGER DEFAULT 0,
+    review_reason TEXT DEFAULT '',
+    added_by TEXT DEFAULT 'csv',
+    qr_token TEXT UNIQUE,
+    checked_in_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_guests_name ON guests(name);
+CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests(phone);
+CREATE INDEX IF NOT EXISTS idx_guests_reg ON guests(reg_id);
+CREATE INDEX IF NOT EXISTS idx_guests_qr ON guests(qr_token);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_reg_name ON guests(reg_id, name);
+CREATE TABLE IF NOT EXISTS staged_imports (
+    token TEXT PRIMARY KEY,
+    file_hash TEXT NOT NULL,
+    file_name TEXT DEFAULT '',
+    payload TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS import_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    file_name TEXT DEFAULT '',
+    registrations INTEGER,
+    guests INTEGER,
+    imported_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    poster_url TEXT DEFAULT '',
+    venue TEXT DEFAULT '',
+    city TEXT DEFAULT '',
+    starts_at TEXT DEFAULT '',
+    ends_at TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS ticket_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_inr INTEGER NOT NULL DEFAULT 0,
+    group_size INTEGER NOT NULL DEFAULT 1,
+    capacity INTEGER NOT NULL DEFAULT 0,
+    sold INTEGER NOT NULL DEFAULT 0,
+    sale_open INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (event_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
+CREATE INDEX IF NOT EXISTS idx_ticket_types_event ON ticket_types(event_id);
+"""
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    if conn.dialect.name == "postgresql":
+        row = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name=:t AND column_name=:c"
+            ),
+            {"t": table, "c": column},
+        ).fetchone()
+        return row is not None
+    rows = conn.execute(text(f"PRAGMA table_info({table})")).mappings().all()
+    return any(r["name"] == column for r in rows)
+
+
+def _ensure_column(conn, table: str, column: str, decl: str) -> None:
+    """ALTER TABLE ADD COLUMN — no-op when the column already exists."""
+    if not _column_exists(conn, table, column):
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+
+
+def get_villa_event_id(conn) -> int:
+    """Seed the VILLA event if missing (idempotent) and return its id."""
+    conn.execute(
+        text(
+            "INSERT INTO events (slug, title, status) VALUES (:slug, :title, 'draft') "
+            "ON CONFLICT(slug) DO NOTHING"
+        ),
+        {"slug": VILLA_SLUG, "title": VILLA_TITLE},
+    )
+    return conn.execute(
+        text("SELECT id FROM events WHERE slug=:s"), {"s": VILLA_SLUG}
+    ).scalar()
+
+
+def backfill_event_ids(conn) -> None:
+    """Point every row with a NULL event_id at the VILLA event (safe twice)."""
+    vid = get_villa_event_id(conn)
+    for table in ("registrations", "guests"):
+        conn.execute(
+            text(f"UPDATE {table} SET event_id=:e WHERE event_id IS NULL"),
+            {"e": vid},
+        )
 
 
 def init_db() -> None:
+    """Idempotent schema creation. Safe to call on every cold start."""
+    global _initialized
     with _lock:
-        conn = get_conn()
-        try:
-            _migrate_group_schema(conn)
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS registrations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    reg_id TEXT UNIQUE NOT NULL,
-                    entry_pass TEXT DEFAULT '',
-                    phone TEXT DEFAULT '',
-                    email TEXT DEFAULT '',
-                    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
-                    needs_review INTEGER DEFAULT 0,
-                    review_reason TEXT DEFAULT '',
-                    created_at TEXT DEFAULT (datetime('now'))
-                );
-                CREATE TABLE IF NOT EXISTS guests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    reg_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    phone TEXT DEFAULT '',
-                    email TEXT DEFAULT '',
-                    payment_status TEXT NOT NULL DEFAULT 'UNDER REVIEW',
-                    entry_pass TEXT DEFAULT '',
-                    needs_review INTEGER DEFAULT 0,
-                    review_reason TEXT DEFAULT '',
-                    qr_token TEXT UNIQUE,
-                    checked_in_at TEXT,
-                    created_at TEXT DEFAULT (datetime('now'))
-                );
-                CREATE INDEX IF NOT EXISTS idx_guests_name ON guests(name);
-                CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests(phone);
-                CREATE INDEX IF NOT EXISTS idx_guests_reg ON guests(reg_id);
-                CREATE INDEX IF NOT EXISTS idx_guests_qr ON guests(qr_token);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_reg_name ON guests(reg_id, name);
-                CREATE TABLE IF NOT EXISTS staged_imports (
-                    token TEXT PRIMARY KEY,
-                    file_hash TEXT NOT NULL,
-                    file_name TEXT DEFAULT '',
-                    payload TEXT NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now'))
-                );
-                CREATE TABLE IF NOT EXISTS import_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file_hash TEXT NOT NULL,
-                    file_name TEXT DEFAULT '',
-                    registrations INTEGER,
-                    guests INTEGER,
-                    imported_at TEXT DEFAULT (datetime('now'))
-                );
-                """
+        engine = get_engine()
+        ddl = _POSTGRES_DDL if engine.dialect.name == "postgresql" else _SQLITE_DDL
+        with engine.begin() as conn:
+            for stmt in ddl.split(";"):
+                s = stmt.strip()
+                if s:
+                    conn.execute(text(s))
+            _ensure_column(conn, "registrations", "event_id", "INTEGER")
+            _ensure_column(conn, "guests", "event_id", "INTEGER")
+            backfill_event_ids(conn)
+        _initialized = True
+
+
+def do_backup() -> str:
+    """Backup before destructive writes. Returns a label for the UI message.
+
+    Postgres (serverless): logical snapshot row in backup_snapshots.
+    SQLite (local): timestamped file copy in data/backups/ (previous behavior).
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if is_postgres():
+        with get_conn() as conn:
+            guests = [dict(r) for r in conn.execute(text("SELECT * FROM guests")).mappings()]
+            regs = [dict(r) for r in conn.execute(text("SELECT * FROM registrations")).mappings()]
+            label = f"snapshot-{ts}-{uuid.uuid4().hex[:6]}"
+            conn.execute(
+                text(
+                    "INSERT INTO backup_snapshots (label, guests_json, registrations_json) "
+                    "VALUES (:l, :g, :r)"
+                ),
+                {"l": label, "g": json.dumps(guests), "r": json.dumps(regs)},
             )
-            _ensure_columns(conn, "guests", GUEST_COLUMNS)
-            _ensure_columns(conn, "registrations", REGISTRATION_COLUMNS)
-            conn.commit()
-        finally:
-            conn.close()
+        return label
+    dest = BACKUP_DIR / f"party-backup-{ts}.db"
+    with get_conn() as conn:
+        conn.execute(text("PRAGMA wal_checkpoint(FULL)"))
+    shutil.copy2(DB_PATH, dest)
+    return dest.name

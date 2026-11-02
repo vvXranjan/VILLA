@@ -4,6 +4,7 @@ Aadhaar columns are dropped immediately and never leave this module's
 header-level filtering — values are never read, stored, logged, or returned.
 """
 import csv
+import html
 import io
 import re
 import secrets
@@ -34,7 +35,13 @@ def _find(headers: list[str], *needles: str) -> Optional[int]:
 
 
 def split_names(raw: str) -> list[str]:
-    parts = re.split(r"[,\n;]+", raw or "")
+    """Split on commas/newlines/semicolons; clean HTML line-break artifacts."""
+    s = raw or ""
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)   # <br>, <br/>, <BR>
+    s = re.sub(r"</p>\s*<p[^>]*>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)                    # any other stray tags
+    s = html.unescape(s)                             # &amp; → &
+    parts = re.split(r"[,\n;]+", s)
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -100,11 +107,22 @@ def parse_google_csv(text: str) -> dict:
         phone = re.sub(r"\D", "", phone_raw)[-10:] if phone_raw else ""
 
         expected = PASS_EXPECTED.get(entry_pass_raw.strip().lower())
+        capacity = expected if expected is not None else len(names)
         needs_review = 0
         reason = ""
-        if expected is not None and len(names) != expected:
+        if expected is not None and len(names) < expected:
+            missing = expected - len(names)
             needs_review = 1
-            reason = f"{entry_pass} pass but {len(names)} name(s) supplied (expected {expected})"
+            reason = (
+                f"INCOMPLETE GROUP DETAILS — {entry_pass} expects {expected}, "
+                f"{len(names)} named ({missing} companion name(s) not supplied)"
+            )
+        elif expected is not None and len(names) > expected:
+            needs_review = 1
+            reason = (
+                f"INCOMPLETE GROUP DETAILS — {entry_pass} expects {expected}, "
+                f"{len(names)} names supplied (verify at gate)"
+            )
 
         reg_num = len(registrations) + 1
         registrations.append(
@@ -116,6 +134,7 @@ def parse_google_csv(text: str) -> dict:
                 "payment_status": pay,
                 "needs_review": needs_review,
                 "review_reason": reason,
+                "expected_capacity": capacity,
                 "names": names,
             }
         )

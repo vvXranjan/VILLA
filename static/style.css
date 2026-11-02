@@ -596,3 +596,20 @@ table.pv .s-review { color: var(--review); }
   .toast { bottom: 86px; }
   .panel { padding: 17px 16px; }
 }
+
+/* ---- incomplete group details (final task) ---- */
+.review-flag .review-sub { display: block; font-weight: 500; margin-top: 4px; opacity: .85; }
+.btn.tiny { width: auto; display: inline-flex; padding: 9px 15px; font-size: 12.5px; margin-top: 9px; }
+.review-flag .btn.tiny { background: var(--card); color: var(--text); border: 1px solid rgba(194, 139, 53, .5); }
+.review-flag .btn.tiny:hover { background: #FFF; border-color: var(--review); }
+.row-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.link-add {
+  border: 1px dashed var(--secondary);
+  background: transparent;
+  color: var(--secondary);
+  font-size: 12px; font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.link-add:hover { background: var(--primary-soft); }
