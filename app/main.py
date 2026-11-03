@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,7 @@ from .models import (
     ImportResult,
     InviteAcceptIn,
     InviteCreateIn,
+    InviteListOut,
     InviteOut,
     InviteStatusOut,
     LoginIn,
@@ -49,7 +51,13 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Party Gate Check-in", lifespan=lifespan)
+app = FastAPI(
+    title="Party Gate Check-in",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 try:
     init_db()
@@ -166,6 +174,19 @@ def _scoped_ids(conn, user, action) -> list[int]:
     if not ids:
         raise HTTPException(403, "Your role does not allow this action")
     return ids
+
+
+def _staging_cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _purge_staging(conn) -> None:
+    """Delete import_staging rows older than 1 hour. Timestamps are TEXT UTC,
+    so a plain string comparison is safe on both SQLite and Postgres."""
+    conn.execute(
+        text("DELETE FROM import_staging WHERE created_at <= :cut"),
+        {"cut": _staging_cutoff()},
+    )
 
 
 @app.get("/", response_class=FileResponse)
@@ -650,17 +671,25 @@ async def import_preview(request: Request, file: UploadFile = File(...), event_i
                 f"This exact file was already imported on {prior['imported_at']} UTC. "
                 "Re-importing will UPDATE existing registrations (check-in status is preserved)."
             )
+        _purge_staging(conn)
         token = secrets.token_hex(16)
         conn.execute(
             text(
-                "INSERT INTO staged_imports (token, file_hash, file_name, payload) "
-                "VALUES (:tok, :h, :fn, :p)"
+                "INSERT INTO import_staging (token, event_id, user_id, payload, created_at) "
+                "VALUES (:tok, :eid, :uid, :p, :created)"
             ),
             {
                 "tok": token,
-                "h": file_hash,
-                "fn": file.filename or "upload.csv",
-                "p": json.dumps({"event_id": target, "regs": regs}),
+                "eid": target,
+                "uid": user["id"],
+                "p": json.dumps(
+                    {
+                        "regs": regs,
+                        "file_hash": file_hash,
+                        "file_name": file.filename or "upload.csv",
+                    }
+                ),
+                "created": utc_now_str(),
             },
         )
 
@@ -695,24 +724,21 @@ async def import_preview(request: Request, file: UploadFile = File(...), event_i
 async def import_confirm(request: Request, token: str, wipe_existing: bool = False):
     user = auth.require_user(request)
     with get_conn() as conn:
+        _purge_staging(conn)
         staged = (
-            conn.execute(text("SELECT * FROM staged_imports WHERE token=:tok"), {"tok": token})
+            conn.execute(text("SELECT * FROM import_staging WHERE token=:tok"), {"tok": token})
             .mappings()
             .fetchone()
         )
         if not staged:
             raise HTTPException(400, "Import token missing or already used. Upload the CSV again.")
+        target = staged["event_id"]
         data = json.loads(staged["payload"])
-        if isinstance(data, dict):
-            target = data.get("event_id") or get_villa_event_id(conn)
-            regs = data.get("regs", [])
-        else:  # legacy staged payload (a plain list of registrations)
-            target = get_villa_event_id(conn)
-            regs = data
+        regs = data["regs"]
+        file_hash = data.get("file_hash", "")
+        file_name = data.get("file_name", "")
         _require_event(conn, target)
         auth.require_action(conn, user, "import", target)
-        file_hash = staged["file_hash"]
-        file_name = staged["file_name"]
 
     # ALWAYS back up the current data before writing (timestamped snapshot),
     # whether this is an update or an explicit wipe.
@@ -805,7 +831,7 @@ async def import_confirm(request: Request, token: str, wipe_existing: bool = Fal
                 ),
                 {"h": file_hash, "fn": file_name, "regs": len(regs), "guests": inserted_guests},
             )
-            conn.execute(text("DELETE FROM staged_imports WHERE token=:tok"), {"tok": token})
+            conn.execute(text("DELETE FROM import_staging WHERE token=:tok"), {"tok": token})
     except HTTPException:
         raise
     except Exception as e:
@@ -854,7 +880,7 @@ def wipe_guests(request: Request):
         n = conn.execute(text("SELECT COUNT(*) FROM guests")).scalar() or 0
         conn.execute(text("DELETE FROM guests"))
         conn.execute(text("DELETE FROM registrations"))
-        conn.execute(text("DELETE FROM staged_imports"))
+        conn.execute(text("DELETE FROM import_staging"))
         return {"wiped_guests": n, "backup_file": backup_file}
 
 
@@ -1292,17 +1318,7 @@ def _require_event(conn, event_id: int) -> None:
         raise HTTPException(404, "Event not found")
 
 
-def _invite_out(inv) -> InviteOut:
-    return InviteOut(
-        code=inv["code"],
-        event_id=inv["event_id"],
-        role=inv["role"],
-        expires_at=inv["expires_at"],
-        used_by=inv["used_by"],
-    )
-
-
-@app.get("/api/admin/events/{event_id}/invites", response_model=list[InviteOut])
+@app.get("/api/admin/events/{event_id}/invites", response_model=list[InviteListOut])
 def admin_list_invites(event_id: int, request: Request):
     user = auth.require_user(request)
     with get_conn() as conn:
@@ -1312,7 +1328,18 @@ def admin_list_invites(event_id: int, request: Request):
             text("SELECT * FROM invites WHERE event_id=:e ORDER BY expires_at DESC"),
             {"e": event_id},
         ).mappings().all()
-        return [_invite_out(r) for r in rows]
+        out = []
+        for inv in rows:
+            valid, reason = _invite_state(inv)
+            out.append(
+                InviteListOut(
+                    code_suffix=inv["code"][-4:],
+                    role=inv["role"],
+                    status="valid" if valid else reason,
+                    expires_at=inv["expires_at"],
+                )
+            )
+        return out
 
 
 @app.post("/api/admin/events/{event_id}/invites", response_model=InviteOut)

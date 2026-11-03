@@ -6,12 +6,13 @@ Order (per Phase 2 plan):
   public checks → no-cookie 401 → wrong-password 401 → owner login
   (clears rate-limit counters) → the original 61 checks with the owner
   session → logout / re-login → role matrix (seeded users) → invite flow
-  → rate limit LAST + login_attempts cleanup.
+  → cross-event isolation → route sweep → rate limit LAST + cleanup.
 
-Safety guard: refuses to run when DATABASE_URL is set in the environment, or
-when a configured URL targets anything other than 127.0.0.1/localhost — this
-script must never touch the live Supabase database. Run it only against a
-local sandbox server (see CLAUDE_CONTEXT.md).
+Runs against SQLite (no DATABASE_URL) or local Postgres (DATABASE_URL set to
+localhost). Safety guard: refuses a DATABASE_URL targeting anything other than
+127.0.0.1/localhost — this script must never touch the live Supabase database.
+Direct DB access (QR read, cross-event seeding, login_attempts cleanup) goes
+through the app's own SQLAlchemy connection so it works on both backends.
 """
 import csv
 import io
@@ -36,11 +37,12 @@ if _db_url:
     _netloc = re.sub(r"^[a-z0-9+.-]+://", "", _db_url).split("/")[0]
     _host = _netloc.rsplit("@", 1)[-1].split(":")[0]
     if _host not in {"127.0.0.1", "localhost", "::1"}:
-        _refuse(f"target host {_host!r} is not 127.0.0.1/localhost")
-    _refuse(
-        "DATABASE_URL is set in this environment — unset it; smoke_test only "
-        "runs against a local sandbox server."
-    )
+        _refuse(f"target host {_host!r} is not 127.0.0.1/localhost — never the Supabase URL")
+
+# Direct-DB helpers (seed/read via SQLAlchemy so the suite runs on both backends).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.database import get_conn, utc_now_str  # noqa: E402
+from sqlalchemy import text as _text  # noqa: E402
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8001"
 EXPECTED_DB = sys.argv[2] if len(sys.argv) > 2 else "sqlite"
@@ -147,6 +149,12 @@ check(
     st == 200 and inv.get("valid") is False and inv.get("reason") == "unknown",
     inv,
 )
+st, _ = req("/docs", raw=True)
+check("GET /docs 404 (docs disabled)", st == 404)
+st, _ = req("/openapi.json", raw=True)
+check("GET /openapi.json 404 (docs disabled)", st == 404)
+st, _ = req("/redoc", raw=True)
+check("GET /redoc 404 (docs disabled)", st == 404)
 
 # ------------------------------------------------- Phase 2: default-deny ----
 print("\n-- no session → 401 --")
@@ -275,11 +283,11 @@ check("export header 10 cols", rows[0] == ["reg_id", "name", "entry_pass", "phon
 check("export 22 guest rows", len(rows) == 23)
 check("export has no aadhaar", "aadhaar" not in csv_text.decode().lower())
 
-# 18: QR lookup — valid token read from source SQLite (tokens migrated as-is)
-import sqlite3 as _sq
-_src = _sq.connect(f"file:{Path(__file__).resolve().parent.parent / 'data' / 'party.db'}?mode=ro", uri=True)
-_tok = _src.execute("SELECT qr_token FROM guests ORDER BY id LIMIT 1").fetchone()[0]
-_src.close()
+# 18: QR lookup — read a real token via the app's own connection (both backends)
+with get_conn() as _conn:
+    _tok = _conn.execute(
+        _text("SELECT qr_token FROM guests WHERE qr_token IS NOT NULL ORDER BY id LIMIT 1")
+    ).scalar()
 st, qg = req(f"/api/qr/{_tok}")
 check("QR valid token lookup", st == 200 and bool(qg.get("name")), qg)
 
@@ -560,6 +568,23 @@ check("owner creates invite", st == 200 and inv.get("code") and inv.get("role") 
 code = inv.get("code", "")
 st, stt = req(f"/api/invites/{code}", cookies=False)
 check("invite status public valid", st == 200 and stt.get("valid") is True and stt.get("event_title"), stt)
+st, ilist = req(f"/api/admin/events/{villa_id}/invites")
+check(
+    "invite list masks codes to last 4",
+    st == 200
+    and all(
+        len(i.get("code_suffix", "")) == 4
+        and "code" not in i
+        and i.get("status") in ("valid", "used", "expired")
+        for i in ilist
+    ),
+    ilist,
+)
+check(
+    "created invite appears (last-4 only)",
+    any(i["code_suffix"] == code[-4:] and i["status"] == "valid" for i in ilist),
+    ilist,
+)
 
 invitee_email = f"invitee-{uuid.uuid4().hex[:8]}@sandbox.test"
 st, acc = req(
@@ -631,33 +656,33 @@ st, acc = req(
 )
 check("accept co_host invite for A (cookie → xa cohost)", st == 200 and acc.get("ok") is True, acc)
 
-# Seed one guest+registration each in A and B (direct SQLite — no API creates
-# arbitrary-event rows; sandbox only, guarded to SQLite by the DATABASE_URL
-# check at the top of this file).
-_db = Path(__file__).resolve().parent.parent / "data" / "party.db"
-_con = _sq.connect(_db, timeout=10)
-_ts = "2026-11-03 00:00:00"
-for _reg, _name, _eid in [
-    ("CE-A-001", "CrossEvent A Guest", idA),
-    ("CE-B-001", "CrossEvent B Guest", idB),
-]:
-    _con.execute(
-        "INSERT INTO registrations (reg_id, entry_pass, phone, email, payment_status,"
-        " needs_review, review_reason, expected_capacity, event_id, created_at)"
-        " VALUES (?, 'Solo', '', '', 'PAID', 0, '', 1, ?, ?)"
-        " ON CONFLICT(reg_id) DO NOTHING",
-        (_reg, _eid, _ts),
-    )
-    _con.execute(
-        "INSERT INTO guests (reg_id, name, phone, email, payment_status, entry_pass,"
-        " needs_review, review_reason, added_by, event_id, created_at)"
-        " VALUES (?, ?, '', '', 'PAID', 'Solo', 0, '', 'csv', ?, ?)"
-        " ON CONFLICT(reg_id, name) DO NOTHING",
-        (_reg, _name, _eid, _ts),
-    )
-_con.commit()
-b_guest_id = _con.execute("SELECT id FROM guests WHERE reg_id='CE-B-001'").fetchone()[0]
-_con.close()
+# Seed one guest+registration each in A and B via the app's own SQLAlchemy
+# connection (works on both SQLite and Postgres — no raw SQLite).
+with get_conn() as _conn:
+    _ts = utc_now_str()
+    for _reg, _name, _eid in [
+        ("CE-A-001", "CrossEvent A Guest", idA),
+        ("CE-B-001", "CrossEvent B Guest", idB),
+    ]:
+        _conn.execute(
+            _text(
+                "INSERT INTO registrations (reg_id, entry_pass, phone, email, payment_status,"
+                " needs_review, review_reason, expected_capacity, event_id, created_at)"
+                " VALUES (:r, 'Solo', '', '', 'PAID', 0, '', 1, :e, :t)"
+                " ON CONFLICT(reg_id) DO NOTHING"
+            ),
+            {"r": _reg, "e": _eid, "t": _ts},
+        )
+        _conn.execute(
+            _text(
+                "INSERT INTO guests (reg_id, name, phone, email, payment_status, entry_pass,"
+                " needs_review, review_reason, added_by, event_id, created_at)"
+                " VALUES (:r, :n, '', '', 'PAID', 'Solo', 0, '', 'csv', :e, :t)"
+                " ON CONFLICT(reg_id, name) DO NOTHING"
+            ),
+            {"r": _reg, "n": _name, "e": _eid, "t": _ts},
+        )
+    b_guest_id = _conn.execute(_text("SELECT id FROM guests WHERE reg_id='CE-B-001'")).scalar()
 
 st, me_xa = req("/api/me")
 check(
@@ -768,18 +793,10 @@ st, b = req(
 )
 check("owner unaffected by locked ip/email keys", st == 200, b)
 
-# login_attempts cleanup (local sandbox only — DATABASE_URL guard above
-# already ensures we are never pointed at a live database)
-if EXPECTED_DB == "sqlite":
-    db_file = Path(__file__).resolve().parent.parent / "data" / "party.db"
-    if db_file.exists():
-        con = _sq.connect(db_file)
-        n = con.execute("DELETE FROM login_attempts").rowcount
-        con.commit()
-        con.close()
-        print(f"  cleaned login_attempts ({n} rows)")
-else:
-    print("  warning: non-sqlite backend — login_attempts left in place")
+# login_attempts cleanup via the app's own connection (works on both backends).
+with get_conn() as _conn:
+    _n = _conn.execute(_text("DELETE FROM login_attempts")).rowcount
+    print(f"  cleaned login_attempts ({_n} rows)")
 
 print(f"\n== {PASS} passed, {FAIL} failed ==")
 sys.exit(1 if FAIL else 0)

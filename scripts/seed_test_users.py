@@ -1,9 +1,9 @@
-"""Seed one user per role (plus a non-member) and an expired invite into the
-LOCAL SANDBOX database for the Phase 2 auth tests.
+"""Seed one user per role (plus a non-member) and an expired invite into a
+LOCAL test database (SQLite sandbox, or local Postgres) for the auth tests.
 
-Safety guard: refuses to run when DATABASE_URL is set in the environment, or
-when a configured URL targets anything other than 127.0.0.1/localhost — this
-script must never touch the live Supabase database.
+Safety guard: refuses to run when a configured DATABASE_URL targets anything
+other than 127.0.0.1/localhost — this script must never touch the live
+Supabase database.
 
 Run:  VILLA_TEST_PASSWORD=... .venv/bin/python scripts/seed_test_users.py
 """
@@ -28,24 +28,21 @@ def refuse(msg: str) -> None:
     sys.exit(2)
 
 
-def check_target_is_local_sandbox() -> None:
+def check_target_is_local() -> None:
     db_url = os.environ.get("DATABASE_URL", "").strip()
     if db_url:
-        # Specific message first: anything that is not localhost is the
-        # dangerous case (live Supabase).
+        # Anything other than localhost is the dangerous case (live Supabase).
         netloc = re.sub(r"^[a-z0-9+.-]+://", "", db_url).split("/")[0]
         host = netloc.rsplit("@", 1)[-1].split(":")[0]
         if host not in LOCAL_HOSTS:
-            refuse(f"target host {host!r} is not 127.0.0.1/localhost")
-        refuse(
-            "DATABASE_URL is set in this environment. seed_test_users only "
-            "runs against the local SQLite sandbox (data/party.db) — unset "
-            "DATABASE_URL before running."
-        )
+            refuse(
+                f"target host {host!r} is not 127.0.0.1/localhost — "
+                "seed_test_users never touches a remote database."
+            )
 
 
 def main() -> None:
-    check_target_is_local_sandbox()
+    check_target_is_local()
     password = os.environ.get("VILLA_TEST_PASSWORD", DEFAULT_TEST_PASSWORD)
     init_db()
 

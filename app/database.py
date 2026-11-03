@@ -122,10 +122,10 @@ CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests(phone);
 CREATE INDEX IF NOT EXISTS idx_guests_reg ON guests(reg_id);
 CREATE INDEX IF NOT EXISTS idx_guests_qr ON guests(qr_token);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_reg_name ON guests(reg_id, name);
-CREATE TABLE IF NOT EXISTS staged_imports (
+CREATE TABLE IF NOT EXISTS import_staging (
     token TEXT PRIMARY KEY,
-    file_hash TEXT NOT NULL,
-    file_name TEXT DEFAULT '',
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
     payload TEXT NOT NULL,
     created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
 );
@@ -236,10 +236,10 @@ CREATE INDEX IF NOT EXISTS idx_guests_phone ON guests(phone);
 CREATE INDEX IF NOT EXISTS idx_guests_reg ON guests(reg_id);
 CREATE INDEX IF NOT EXISTS idx_guests_qr ON guests(qr_token);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_guests_reg_name ON guests(reg_id, name);
-CREATE TABLE IF NOT EXISTS staged_imports (
+CREATE TABLE IF NOT EXISTS import_staging (
     token TEXT PRIMARY KEY,
-    file_hash TEXT NOT NULL,
-    file_name TEXT DEFAULT '',
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
     payload TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );

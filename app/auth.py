@@ -31,7 +31,8 @@ SESSION_COOKIE = "villa_session"
 SESSION_TTL_SECONDS = 12 * 3600  # 12 hours
 PBKDF2_ITERATIONS = 600_000
 
-RATE_LIMIT_MAX = 5
+RATE_LIMIT_MAX_EMAIL = 5
+RATE_LIMIT_MAX_IP = 30  # venue staff share one IP, so the per-IP budget is looser
 RATE_LIMIT_WINDOW_MIN = 15
 
 PUBLIC_EXACT = {"/", "/api/health", "/api/login", "/api/logout", "/api/me"}
@@ -273,15 +274,17 @@ def _window_expired(window_start: str) -> bool:
 
 
 def check_rate_limit(conn, ip: str, email: str) -> None:
-    """Raise 429 when either the ip: or email: key is at/over the limit."""
+    """Raise 429 when either the ip: or email: key is at/over its limit.
+    email: uses the strict budget; ip: is looser (venue staff share one IP)."""
     for key in _rate_keys(ip, email):
+        limit = RATE_LIMIT_MAX_IP if key.startswith("ip:") else RATE_LIMIT_MAX_EMAIL
         row = conn.execute(
             text("SELECT fail_count, window_start FROM login_attempts WHERE key=:k"),
             {"k": key},
         ).mappings().fetchone()
         if not row:
             continue
-        if row["fail_count"] >= RATE_LIMIT_MAX and not _window_expired(row["window_start"]):
+        if row["fail_count"] >= limit and not _window_expired(row["window_start"]):
             raise HTTPException(
                 429,
                 f"Too many failed attempts — try again in {RATE_LIMIT_WINDOW_MIN} minutes",

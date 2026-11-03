@@ -204,6 +204,13 @@ class InviteOut(BaseModel):
     used_by: Optional[int] = None
 
 
+class InviteListOut(BaseModel):
+    code_suffix: str
+    role: str
+    status: str  # valid | used | expired
+    expires_at: str
+
+
 class EventMemberOut(BaseModel):
     user_id: int
     name: str
