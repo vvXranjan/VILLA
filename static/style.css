@@ -613,3 +613,110 @@ table.pv .s-review { color: var(--review); }
   white-space: nowrap;
 }
 .link-add:hover { background: var(--primary-soft); }
+
+/* ============================ auth / login ============================ */
+
+.login-view {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 20px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+  padding: 30px 28px 28px;
+}
+
+.login-brand {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+
+.login-card h1 {
+  font-size: 20px;
+  font-weight: 800;
+  margin: 0 0 4px;
+}
+
+.login-card .sub {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 0 0 18px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field span {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+
+.field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  font-size: 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--primary);
+  background: #fff;
+}
+
+.login-error {
+  background: var(--unpaid-soft);
+  color: var(--unpaid);
+  border: 1px solid #F3D7D3;
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.whoami {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  padding: 5px 10px;
+  background: var(--primary-soft);
+  border-radius: 999px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#logoutBtnSide {
+  width: 100%;
+  margin-bottom: 12px;
+}

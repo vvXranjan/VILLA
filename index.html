@@ -12,6 +12,7 @@
 </head>
 <body>
 
+<div id="appRoot" hidden>
 <div class="shell">
 
   <!-- ============================ SIDEBAR (desktop) ============================ -->
@@ -62,6 +63,8 @@
 
     <div class="side-foot">
       <div class="gold-line"></div>
+      <div class="whoami" id="whoamiSide" hidden></div>
+      <button class="btn secondary small" id="logoutBtnSide" hidden>Sign out</button>
       <div class="side-event">31 October 2026</div>
       <div class="side-note">Private event · Local server · No cloud</div>
     </div>
@@ -82,6 +85,8 @@
       <div class="topbar-right">
         <span class="event-date">31 Oct 2026</span>
         <span class="gate-live" id="gateLive"><span class="live-dot" aria-hidden="true"></span><span id="gateLiveText">Connecting…</span></span>
+        <span class="whoami" id="whoamiTop" hidden></span>
+        <button class="btn secondary tiny" id="logoutBtnTop" hidden>Sign out</button>
       </div>
       <div class="gold-rule" aria-hidden="true"></div>
     </header>
@@ -337,6 +342,37 @@
     <span>Export</span>
   </button>
 </nav>
+</div><!-- /appRoot -->
+
+<!-- ========================== LOGIN ========================== -->
+<div id="loginView" class="login-view" hidden>
+  <div class="login-card">
+    <div class="brand-block login-brand">
+      <svg class="diya" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 3.2c1.4 1.7 2.1 2.9 2.1 4a2.1 2.1 0 1 1-4.2 0c0-1.1.7-2.3 2.1-4Z" fill="#D49A45"/>
+        <path d="M4.5 13.2h15c0 3.6-3.4 6.5-7.5 6.5s-7.5-2.9-7.5-6.5Z" stroke="#762D35" stroke-width="1.6" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div class="wordmark">VILLA</div>
+        <div class="brand-sub">Desi Diwali Bling</div>
+      </div>
+    </div>
+    <h1>Staff sign-in</h1>
+    <p class="sub">Gate check-in requires an account.</p>
+    <form id="loginForm" autocomplete="on">
+      <label class="field">
+        <span>Email</span>
+        <input id="loginEmail" type="email" name="email" autocomplete="username" required placeholder="you@example.com">
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="loginPassword" type="password" name="password" autocomplete="current-password" required placeholder="••••••••">
+      </label>
+      <div id="loginError" class="login-error" hidden></div>
+      <button class="btn primary login-submit" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
 
 <div id="toast" class="toast" hidden></div>
 

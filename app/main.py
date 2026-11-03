@@ -8,22 +8,31 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
+from . import auth
 from .csv_import import new_qr_token, parse_google_csv
 from .database import ROOT, do_backup, get_conn, get_engine, get_villa_event_id, init_db, utc_now_str
 from .models import (
     CheckInResult,
     EventCreateIn,
     EventEditIn,
+    EventMemberOut,
     EventOut,
     GuestOut,
     ImportPreview,
     ImportResult,
+    InviteAcceptIn,
+    InviteCreateIn,
+    InviteOut,
+    InviteStatusOut,
+    LoginIn,
+    MemberAddIn,
     MemberOut,
+    MemberRoleIn,
     RegistrationOut,
     Stats,
     TicketTypeCreateIn,
@@ -48,6 +57,21 @@ except Exception:
     pass  # surfaced properly via lifespan /health, not at import time
 
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    """Default-deny for /api/*: a valid session cookie is required everywhere
+    except the public allowlist (health/login/logout/me/invites). Static
+    files and the index page are never gated."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        user = auth.load_user_from_request(request)
+        request.state.user = user
+        if user is None and not auth.is_public(path):
+            # Same body for unknown-email and no-cookie: no oracle.
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    return await call_next(request)
 
 
 def _row_to_guest(r) -> GuestOut:
@@ -131,6 +155,19 @@ def slugify(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
+def _q(sql: str):
+    """text() with an expanding :ids bindparam (portable IN across SQLite/PG)."""
+    return text(sql).bindparams(bindparam("ids", expanding=True))
+
+
+def _scoped_ids(conn, user, action) -> list[int]:
+    """Event ids the user may act on, or 403 when there are none."""
+    ids = list(auth.accessible_event_ids(conn, user, action))
+    if not ids:
+        raise HTTPException(403, "Your role does not allow this action")
+    return ids
+
+
 @app.get("/", response_class=FileResponse)
 def index():
     return FileResponse(ROOT / "index.html", media_type="text/html")
@@ -146,20 +183,97 @@ def health():
         raise HTTPException(503, f"Database unavailable: {e}")
 
 
-@app.get("/api/stats", response_model=Stats)
-def stats():
+# ------------------------------------------------------------------ auth ----
+
+_BAD_CREDENTIALS = "Invalid email or password"
+
+
+@app.post("/api/login")
+def login(body: LoginIn, request: Request):
+    ip = auth.client_ip(request)
+    email = body.email.strip().lower()
+    outcome = None
+    user_out = None
     with get_conn() as conn:
-        one = lambda q: conn.execute(text(q)).scalar() or 0
-        total = one("SELECT COUNT(*) FROM guests")
-        paid = one("SELECT COUNT(*) FROM guests WHERE payment_status='PAID'")
-        unpaid = one("SELECT COUNT(*) FROM guests WHERE payment_status='UNPAID'")
-        review = one("SELECT COUNT(*) FROM guests WHERE payment_status='UNDER REVIEW'")
-        checked = one("SELECT COUNT(*) FROM guests WHERE checked_in_at IS NOT NULL")
-        regs = one("SELECT COUNT(*) FROM registrations")
-        capacity = one("SELECT COALESCE(SUM(expected_capacity),0) FROM registrations") or one(
-            "SELECT COUNT(*) FROM guests"
+        try:
+            auth.check_rate_limit(conn, ip, email)
+        except HTTPException:
+            outcome = "rate_limited"
+        if outcome is None:
+            user = auth.user_by_email(conn, email)
+            if user and auth.verify_password(body.password, user["password_hash"]):
+                auth.clear_failures(conn, email)
+                outcome = "ok"
+                user_out = user
+            else:
+                if not user:
+                    # Unknown email: burn one PBKDF2 so timing matches
+                    # a wrong password (no user enumeration).
+                    auth.burn_password_time(body.password)
+                auth.record_failure(conn, ip, email)
+                outcome = "bad_credentials"
+    # HTTPExceptions are raised AFTER the with-block so record_failure commits
+    # (get_conn rolls back on an exception raised inside it).
+    if outcome == "rate_limited":
+        raise HTTPException(
+            429,
+            f"Too many failed attempts — try again in {auth.RATE_LIMIT_WINDOW_MIN} minutes",
         )
-        incomplete = one("SELECT COUNT(*) FROM registrations WHERE needs_review=1")
+    if outcome == "bad_credentials":
+        raise HTTPException(401, _BAD_CREDENTIALS)
+    response = JSONResponse(
+        {
+            "ok": True,
+            "user": {
+                "id": user_out["id"],
+                "name": user_out["name"],
+                "email": user_out["email"],
+                "is_owner": user_out["is_owner"],
+            },
+        }
+    )
+    auth.set_session_cookie(response, request, user_out["id"])
+    return response
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    response = JSONResponse({"ok": True})
+    auth.clear_session_cookie(response, request)
+    return response
+
+
+@app.get("/api/me")
+def me(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        return {"user": None}
+    with get_conn() as conn:
+        memberships = [
+            {"event_id": r["event_id"], "role": r["role"]}
+            for r in conn.execute(
+                text("SELECT event_id, role FROM event_members WHERE user_id=:u ORDER BY event_id"),
+                {"u": user["id"]},
+            ).mappings().all()
+        ]
+    return {"user": {**user, "memberships": memberships}}
+
+
+@app.get("/api/stats", response_model=Stats)
+def stats(request: Request):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        ids = _scoped_ids(conn, user, "view")
+        params = {"ids": ids}
+        one = lambda q: conn.execute(_q(q), params).scalar() or 0
+        total = one("SELECT COUNT(*) FROM guests WHERE event_id IN :ids")
+        paid = one("SELECT COUNT(*) FROM guests WHERE payment_status='PAID' AND event_id IN :ids")
+        unpaid = one("SELECT COUNT(*) FROM guests WHERE payment_status='UNPAID' AND event_id IN :ids")
+        review = one("SELECT COUNT(*) FROM guests WHERE payment_status='UNDER REVIEW' AND event_id IN :ids")
+        checked = one("SELECT COUNT(*) FROM guests WHERE checked_in_at IS NOT NULL AND event_id IN :ids")
+        regs = one("SELECT COUNT(*) FROM registrations WHERE event_id IN :ids")
+        capacity = one("SELECT COALESCE(SUM(expected_capacity),0) FROM registrations WHERE event_id IN :ids")
+        incomplete = one("SELECT COUNT(*) FROM registrations WHERE needs_review=1 AND event_id IN :ids")
         return Stats(
             registrations=regs,
             total=total,
@@ -169,7 +283,7 @@ def stats():
             under_review=review,
             checked_in=checked,
             paid_remaining=paid - one(
-                "SELECT COUNT(*) FROM guests WHERE payment_status='PAID' AND checked_in_at IS NOT NULL"
+                "SELECT COUNT(*) FROM guests WHERE payment_status='PAID' AND checked_in_at IS NOT NULL AND event_id IN :ids"
             ),
             pending_total=total - checked,
             incomplete_groups=incomplete,
@@ -178,21 +292,26 @@ def stats():
 
 
 @app.get("/api/guests", response_model=list[GuestOut])
-def search_guests(q: str = ""):
+def search_guests(request: Request, q: str = ""):
+    user = auth.require_user(request)
     with get_conn() as conn:
-        like = f"%{q.strip()}%"
+        ids = _scoped_ids(conn, user, "search")
+        params = {"ids": ids}
         if not q.strip():
-            rows = conn.execute(text("SELECT * FROM guests ORDER BY name LIMIT 50")).mappings().all()
+            rows = conn.execute(
+                _q("SELECT * FROM guests WHERE event_id IN :ids ORDER BY name LIMIT 50"), params
+            ).mappings().all()
         else:
+            like = f"%{q.strip()}%"
             rows = (
                 conn.execute(
-                    text(
+                    _q(
                         """SELECT * FROM guests
-                           WHERE lower(name) LIKE lower(:like) OR lower(phone) LIKE lower(:like)
-                              OR lower(reg_id) LIKE lower(:like)
+                           WHERE event_id IN :ids AND (lower(name) LIKE lower(:like)
+                              OR lower(phone) LIKE lower(:like) OR lower(reg_id) LIKE lower(:like))
                            ORDER BY reg_id, name LIMIT 100"""
                     ),
-                    {"like": like},
+                    {**params, "like": like},
                 )
                 .mappings()
                 .all()
@@ -201,23 +320,29 @@ def search_guests(q: str = ""):
 
 
 @app.get("/api/registrations", response_model=list[RegistrationOut])
-def search_registrations(q: str = ""):
+def search_registrations(request: Request, q: str = ""):
     """Grouped search: returns registrations with all their members."""
+    user = auth.require_user(request)
     with get_conn() as conn:
-        like = f"%{q.strip()}%"
+        ids = _scoped_ids(conn, user, "search")
+        params = {"ids": ids}
         if not q.strip():
-            regs = conn.execute(text("SELECT * FROM registrations ORDER BY reg_id LIMIT 50")).mappings().all()
+            regs = conn.execute(
+                _q("SELECT * FROM registrations WHERE event_id IN :ids ORDER BY reg_id LIMIT 50"),
+                params,
+            ).mappings().all()
         else:
+            like = f"%{q.strip()}%"
             regs = (
                 conn.execute(
-                    text(
+                    _q(
                         """SELECT DISTINCT r.* FROM registrations r
                            JOIN guests g ON g.reg_id = r.reg_id
-                           WHERE lower(g.name) LIKE lower(:like) OR lower(r.phone) LIKE lower(:like)
-                              OR lower(r.reg_id) LIKE lower(:like)
+                           WHERE r.event_id IN :ids AND (lower(g.name) LIKE lower(:like)
+                              OR lower(r.phone) LIKE lower(:like) OR lower(r.reg_id) LIKE lower(:like))
                            ORDER BY r.reg_id LIMIT 50"""
                     ),
-                    {"like": like},
+                    {**params, "like": like},
                 )
                 .mappings()
                 .all()
@@ -237,7 +362,8 @@ def search_registrations(q: str = ""):
 
 
 @app.get("/api/guests/{guest_id}", response_model=GuestOut)
-def get_guest(guest_id: int):
+def get_guest(guest_id: int, request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
         r = (
             conn.execute(text("SELECT * FROM guests WHERE id=:id"), {"id": guest_id})
@@ -246,11 +372,20 @@ def get_guest(guest_id: int):
         )
         if not r:
             raise HTTPException(404, "Guest not found")
+        auth.require_action(conn, user, "view", _guest_event_id(conn, r))
         return _row_to_guest(r)
 
 
+def _guest_event_id(conn, r) -> int:
+    """Event a guest row belongs to (falls back to the VILLA event)."""
+    if "event_id" in r.keys() and r["event_id"]:
+        return r["event_id"]
+    return get_villa_event_id(conn)
+
+
 @app.post("/api/guests/{guest_id}/checkin", response_model=CheckInResult)
-def checkin(guest_id: int):
+def checkin(guest_id: int, request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
         r = (
             conn.execute(text("SELECT * FROM guests WHERE id=:id"), {"id": guest_id})
@@ -259,6 +394,7 @@ def checkin(guest_id: int):
         )
         if not r:
             return CheckInResult(ok=False, message="Invalid registration", guest=None)
+        auth.require_action(conn, user, "checkin", _guest_event_id(conn, r))
         if r["checked_in_at"]:
             return CheckInResult(
                 ok=False,
@@ -297,8 +433,17 @@ def checkin(guest_id: int):
 
 
 @app.post("/api/guests/{guest_id}/undo", response_model=CheckInResult)
-def undo(guest_id: int):
+def undo(guest_id: int, request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        r0 = (
+            conn.execute(text("SELECT * FROM guests WHERE id=:id"), {"id": guest_id})
+            .mappings()
+            .fetchone()
+        )
+        if not r0:
+            raise HTTPException(404)
+        auth.require_action(conn, user, "undo", _guest_event_id(conn, r0))
         conn.execute(text("UPDATE guests SET checked_in_at=NULL WHERE id=:id"), {"id": guest_id})
         r = (
             conn.execute(text("SELECT * FROM guests WHERE id=:id"), {"id": guest_id})
@@ -311,10 +456,15 @@ def undo(guest_id: int):
 
 
 @app.get("/api/list/arrived", response_model=list[GuestOut])
-def arrived():
+def arrived(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        ids = _scoped_ids(conn, user, "view")
         rows = (
-            conn.execute(text("SELECT * FROM guests WHERE checked_in_at IS NOT NULL ORDER BY checked_in_at"))
+            conn.execute(
+                _q("SELECT * FROM guests WHERE checked_in_at IS NOT NULL AND event_id IN :ids ORDER BY checked_in_at"),
+                {"ids": ids},
+            )
             .mappings()
             .all()
         )
@@ -322,10 +472,15 @@ def arrived():
 
 
 @app.get("/api/list/pending", response_model=list[GuestOut])
-def pending():
+def pending(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        ids = _scoped_ids(conn, user, "view")
         rows = (
-            conn.execute(text("SELECT * FROM guests WHERE checked_in_at IS NULL ORDER BY name"))
+            conn.execute(
+                _q("SELECT * FROM guests WHERE checked_in_at IS NULL AND event_id IN :ids ORDER BY name"),
+                {"ids": ids},
+            )
             .mappings()
             .all()
         )
@@ -333,10 +488,15 @@ def pending():
 
 
 @app.get("/api/list/manual_review", response_model=list[RegistrationOut])
-def manual_review():
+def manual_review(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        ids = _scoped_ids(conn, user, "view")
         regs = (
-            conn.execute(text("SELECT * FROM registrations WHERE needs_review=1 ORDER BY reg_id"))
+            conn.execute(
+                _q("SELECT * FROM registrations WHERE needs_review=1 AND event_id IN :ids ORDER BY reg_id"),
+                {"ids": ids},
+            )
             .mappings()
             .all()
         )
@@ -355,15 +515,18 @@ def manual_review():
 
 
 @app.get("/api/export.csv")
-def export():
+def export(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        ids = _scoped_ids(conn, user, "export")
         rows = (
             conn.execute(
-                text(
+                _q(
                     """SELECT reg_id, name, entry_pass, phone, email, payment_status,
                               needs_review, added_by, checked_in_at
-                       FROM guests ORDER BY reg_id, id"""
-                )
+                       FROM guests WHERE event_id IN :ids ORDER BY reg_id, id"""
+                ),
+                {"ids": ids},
             )
             .mappings()
             .all()
@@ -407,7 +570,8 @@ def export():
 
 
 @app.get("/api/qr/{token}", response_model=GuestOut)
-def qr_lookup(token: str):
+def qr_lookup(token: str, request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
         r = (
             conn.execute(text("SELECT * FROM guests WHERE qr_token=:t"), {"t": token})
@@ -416,13 +580,19 @@ def qr_lookup(token: str):
         )
         if not r:
             raise HTTPException(404, "Invalid QR token")
+        auth.require_action(conn, user, "view", _guest_event_id(conn, r))
         return _row_to_guest(r)
 
 
 # ---------------------------------------------------------------- import ----
 
 @app.post("/api/import/preview", response_model=ImportPreview)
-async def import_preview(file: UploadFile = File(...)):
+async def import_preview(request: Request, file: UploadFile = File(...), event_id: Optional[int] = None):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        target = event_id or get_villa_event_id(conn)
+        _require_event(conn, target)
+        auth.require_action(conn, user, "import", target)
     raw_bytes = await file.read()
     file_hash = hashlib.sha256(raw_bytes).hexdigest()
     text_content = raw_bytes.decode("utf-8-sig", errors="replace")
@@ -486,7 +656,12 @@ async def import_preview(file: UploadFile = File(...)):
                 "INSERT INTO staged_imports (token, file_hash, file_name, payload) "
                 "VALUES (:tok, :h, :fn, :p)"
             ),
-            {"tok": token, "h": file_hash, "fn": file.filename or "upload.csv", "p": json.dumps(regs)},
+            {
+                "tok": token,
+                "h": file_hash,
+                "fn": file.filename or "upload.csv",
+                "p": json.dumps({"event_id": target, "regs": regs}),
+            },
         )
 
     return ImportPreview(
@@ -517,7 +692,8 @@ async def import_preview(file: UploadFile = File(...)):
 
 
 @app.post("/api/import/confirm", response_model=ImportResult)
-async def import_confirm(token: str, wipe_existing: bool = False):
+async def import_confirm(request: Request, token: str, wipe_existing: bool = False):
+    user = auth.require_user(request)
     with get_conn() as conn:
         staged = (
             conn.execute(text("SELECT * FROM staged_imports WHERE token=:tok"), {"tok": token})
@@ -526,7 +702,15 @@ async def import_confirm(token: str, wipe_existing: bool = False):
         )
         if not staged:
             raise HTTPException(400, "Import token missing or already used. Upload the CSV again.")
-        regs = json.loads(staged["payload"])
+        data = json.loads(staged["payload"])
+        if isinstance(data, dict):
+            target = data.get("event_id") or get_villa_event_id(conn)
+            regs = data.get("regs", [])
+        else:  # legacy staged payload (a plain list of registrations)
+            target = get_villa_event_id(conn)
+            regs = data
+        _require_event(conn, target)
+        auth.require_action(conn, user, "import", target)
         file_hash = staged["file_hash"]
         file_name = staged["file_name"]
 
@@ -536,10 +720,10 @@ async def import_confirm(token: str, wipe_existing: bool = False):
 
     try:
         with get_engine().begin() as conn:
-            event_id = get_villa_event_id(conn)
+            event_id = target
             if wipe_existing:
-                conn.execute(text("DELETE FROM guests"))
-                conn.execute(text("DELETE FROM registrations"))
+                conn.execute(text("DELETE FROM guests WHERE event_id=:e"), {"e": event_id})
+                conn.execute(text("DELETE FROM registrations WHERE event_id=:e"), {"e": event_id})
 
             inserted_regs = inserted_guests = updated = 0
             for r in regs:
@@ -644,8 +828,10 @@ async def import_confirm(token: str, wipe_existing: bool = False):
 # ----------------------------------------------------------------- admin ----
 
 @app.post("/api/admin/reset_all")
-def reset_all():
+def reset_all(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
+        auth.require_any_action(conn, user, "reset_all")
         n = conn.execute(
             text("UPDATE guests SET checked_in_at=NULL WHERE checked_in_at IS NOT NULL")
         ).rowcount
@@ -653,13 +839,16 @@ def reset_all():
 
 
 @app.post("/api/admin/reset_guest/{guest_id}")
-def reset_guest(guest_id: int):
-    return undo(guest_id)
+def reset_guest(guest_id: int, request: Request):
+    return undo(guest_id, request)
 
 
 @app.post("/api/admin/wipe_guests")
-def wipe_guests():
+def wipe_guests(request: Request):
     """Explicit destructive action: remove all guest/registration data."""
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        auth.require_any_action(conn, user, "wipe")
     backup_file = do_backup()
     with get_conn() as conn:
         n = conn.execute(text("SELECT COUNT(*) FROM guests")).scalar() or 0
@@ -670,13 +859,14 @@ def wipe_guests():
 
 
 @app.post("/api/admin/add_companion")
-def add_companion(reg_id: str, name: str):
+def add_companion(request: Request, reg_id: str, name: str):
     """Admin-only: add a missing companion name to an incomplete group.
 
     The added guest is recorded as added_by='admin' (not CSV-supplied),
     inherits the registration's payment status / pass type, and gets its
     own independent check-in status.
     """
+    user = auth.require_user(request)
     names = [n.strip() for n in name.replace("\n", ",").split(",") if n.strip()]
     if not names:
         raise HTTPException(400, "Provide at least one companion name")
@@ -689,6 +879,8 @@ def add_companion(reg_id: str, name: str):
         )
         if not reg:
             raise HTTPException(404, "Registration not found")
+        reg_event = reg["event_id"] if "event_id" in reg.keys() and reg["event_id"] else get_villa_event_id(conn)
+        auth.require_action(conn, user, "add_companion", reg_event)
         expected = reg["expected_capacity"] or 0
         event_id = reg["event_id"] or get_villa_event_id(conn)
         added = []
@@ -770,9 +962,25 @@ def add_companion(reg_id: str, name: str):
 # --------------------------------------------------------------- events ----
 
 @app.get("/api/admin/events", response_model=list[EventOut])
-def admin_list_events():
+def admin_list_events(request: Request):
+    user = auth.require_user(request)
     with get_conn() as conn:
-        events = conn.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
+        if user["is_owner"]:
+            events = conn.execute(text("SELECT * FROM events ORDER BY id")).mappings().all()
+        else:
+            # Non-owners only see events they are a member of.
+            events = (
+                conn.execute(
+                    text(
+                        """SELECT e.* FROM events e
+                           JOIN event_members m ON m.event_id = e.id
+                           WHERE m.user_id = :u ORDER BY e.id"""
+                    ),
+                    {"u": user["id"]},
+                )
+                .mappings()
+                .all()
+            )
         out = []
         for e in events:
             tts = conn.execute(
@@ -784,7 +992,10 @@ def admin_list_events():
 
 
 @app.post("/api/admin/events", response_model=EventOut)
-def admin_create_event(body: EventCreateIn):
+def admin_create_event(body: EventCreateIn, request: Request):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        auth.require_any_action(conn, user, "create_event")
     if body.status not in EVENT_STATUSES:
         raise HTTPException(400, f"status must be one of {sorted(EVENT_STATUSES)}")
     if not body.title.strip():
@@ -822,7 +1033,8 @@ def admin_create_event(body: EventCreateIn):
 
 
 @app.patch("/api/admin/events/{event_id}", response_model=EventOut)
-def admin_edit_event(event_id: int, body: EventEditIn):
+def admin_edit_event(event_id: int, body: EventEditIn, request: Request):
+    user = auth.require_user(request)
     allowed = {"title", "description", "poster_url", "venue", "city", "starts_at", "ends_at"}
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items() if k in allowed}
     if not fields:
@@ -835,6 +1047,7 @@ def admin_edit_event(event_id: int, body: EventEditIn):
         ).fetchone()
         if not exists:
             raise HTTPException(404, "Event not found")
+        auth.require_action(conn, user, "edit_event", event_id)
         sets = ", ".join(f"{k}=:v_{k}" for k in fields)
         params = {f"v_{k}": v for k, v in fields.items()}
         params["id"] = event_id
@@ -843,17 +1056,24 @@ def admin_edit_event(event_id: int, body: EventEditIn):
 
 
 @app.post("/api/admin/events/{event_id}/publish", response_model=EventOut)
-def admin_publish_event(event_id: int):
-    return _set_event_status(event_id, "published")
+def admin_publish_event(event_id: int, request: Request):
+    return _set_event_status(event_id, "published", request)
 
 
 @app.post("/api/admin/events/{event_id}/close", response_model=EventOut)
-def admin_close_event(event_id: int):
-    return _set_event_status(event_id, "closed")
+def admin_close_event(event_id: int, request: Request):
+    return _set_event_status(event_id, "closed", request)
 
 
-def _set_event_status(event_id: int, status: str) -> EventOut:
+def _set_event_status(event_id: int, status: str, request: Request) -> EventOut:
+    user = auth.require_user(request)
     with get_conn() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM events WHERE id=:i"), {"i": event_id}
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Event not found")
+        auth.require_action(conn, user, "edit_event", event_id)
         cur = conn.execute(
             text("UPDATE events SET status=:s WHERE id=:i"), {"s": status, "i": event_id}
         )
@@ -876,7 +1096,8 @@ def _validate_ticket_fields(
 
 
 @app.post("/api/admin/events/{event_id}/ticket-types", response_model=EventOut)
-def admin_create_ticket_type(event_id: int, body: TicketTypeCreateIn):
+def admin_create_ticket_type(event_id: int, body: TicketTypeCreateIn, request: Request):
+    user = auth.require_user(request)
     if not body.name.strip():
         raise HTTPException(400, "name is required")
     _validate_ticket_fields(body.price_inr, body.group_size, body.capacity)
@@ -886,6 +1107,7 @@ def admin_create_ticket_type(event_id: int, body: TicketTypeCreateIn):
         ).fetchone()
         if not exists:
             raise HTTPException(404, "Event not found")
+        auth.require_action(conn, user, "manage_tickets", event_id)
         dup = conn.execute(
             text("SELECT 1 FROM ticket_types WHERE event_id=:e AND name=:n"),
             {"e": event_id, "n": body.name.strip()},
@@ -911,11 +1133,12 @@ def admin_create_ticket_type(event_id: int, body: TicketTypeCreateIn):
 
 
 @app.patch("/api/admin/ticket-types/{tt_id}", response_model=EventOut)
-def admin_edit_ticket_type(tt_id: int, body: TicketTypeEditIn):
+def admin_edit_ticket_type(tt_id: int, body: TicketTypeEditIn, request: Request):
+    user = auth.require_user(request)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(400, "No updatable fields supplied")
-    if "name" in fields and not (fields["name"] or "").strip():
+    if "name" in fields and not (fields.get("name") or "").strip():
         raise HTTPException(400, "name must not be empty")
     _validate_ticket_fields(
         fields.get("price_inr"),
@@ -930,8 +1153,325 @@ def admin_edit_ticket_type(tt_id: int, body: TicketTypeEditIn):
         ).mappings().fetchone()
         if not row:
             raise HTTPException(404, "Ticket type not found")
+        auth.require_action(conn, user, "manage_tickets", row["event_id"])
         sets = ", ".join(f"{k}=:v_{k}" for k in fields)
         params = {f"v_{k}": v for k, v in fields.items()}
         params["id"] = tt_id
         conn.execute(text(f"UPDATE ticket_types SET {sets} WHERE id=:id"), params)
         return _load_event(conn, row["event_id"])
+
+
+# --------------------------------------------------------------- invites ----
+
+_INVITE_ROLES = {"gate_staff", "co_host"}
+
+
+def _invite_row(conn, code: str):
+    return (
+        conn.execute(text("SELECT * FROM invites WHERE code=:c"), {"c": code})
+        .mappings()
+        .fetchone()
+    )
+
+
+def _invite_state(inv) -> tuple[bool, str]:
+    """(valid, reason). Codes are single-use with a 7-day expiry."""
+    if not inv:
+        return False, "unknown"
+    if inv["used_by"]:
+        return False, "used"
+    if (inv["expires_at"] or "") <= utc_now_str():
+        return False, "expired"
+    return True, ""
+
+
+@app.get("/api/invites/{code}", response_model=InviteStatusOut)
+def invite_status(code: str):
+    """Public: lets the invite landing page show valid/expired before signup."""
+    with get_conn() as conn:
+        inv = _invite_row(conn, code)
+        valid, reason = _invite_state(inv)
+        title = ""
+        if inv:
+            row = conn.execute(
+                text("SELECT title FROM events WHERE id=:i"), {"i": inv["event_id"]}
+            ).fetchone()
+            title = row[0] if row else ""
+        return InviteStatusOut(
+            code=code,
+            valid=valid,
+            reason=reason,
+            role=inv["role"] if inv else "",
+            event_id=inv["event_id"] if inv else None,
+            event_title=title,
+        )
+
+
+@app.post("/api/invites/{code}/accept")
+def invite_accept(code: str, body: InviteAcceptIn, request: Request):
+    """Single-use invite: signup (new account) or login (existing), then join
+    the event as the invited role. Sets the session cookie on success."""
+    ip = auth.client_ip(request)
+    email = body.email.strip().lower()
+    auth.check_password_strength(body.password)
+    outcome = None
+    payload = None
+    with get_conn() as conn:
+        inv = _invite_row(conn, code)
+        valid, reason = _invite_state(inv)
+        if not valid:
+            raise HTTPException(400, f"Invite invalid or {reason}")
+        try:
+            auth.check_rate_limit(conn, ip, email)
+        except HTTPException:
+            outcome = "rate_limited"
+        if outcome is None:
+            user = auth.user_by_email(conn, email)
+            if user:
+                if not auth.verify_password(body.password, user["password_hash"]):
+                    auth.record_failure(conn, ip, email)
+                    outcome = "bad_credentials"
+            else:
+                if not body.name.strip():
+                    raise HTTPException(400, "Name is required for a new account")
+                uid = auth.create_user(conn, body.name, email, body.password)
+                user = {"id": uid, "name": body.name.strip(), "email": email, "is_owner": False}
+            if outcome is None:
+                auth.clear_failures(conn, email)
+                # Join the event (never downgrade an existing membership).
+                conn.execute(
+                    text(
+                        """INSERT INTO event_members (event_id, user_id, role)
+                           VALUES (:e, :u, :r)
+                           ON CONFLICT (event_id, user_id) DO NOTHING"""
+                    ),
+                    {"e": inv["event_id"], "u": user["id"], "r": inv["role"]},
+                )
+                used = conn.execute(
+                    text(
+                        "UPDATE invites SET used_by=:u WHERE code=:c AND used_by IS NULL"
+                    ),
+                    {"u": user["id"], "c": code},
+                ).rowcount
+                if used == 0:
+                    raise HTTPException(409, "Invite was just used")
+                outcome = "ok"
+                payload = (user, inv["event_id"], inv["role"])
+    if outcome == "rate_limited":
+        raise HTTPException(
+            429,
+            f"Too many failed attempts — try again in {auth.RATE_LIMIT_WINDOW_MIN} minutes",
+        )
+    if outcome == "bad_credentials":
+        raise HTTPException(401, _BAD_CREDENTIALS)
+    user, event_id, role = payload
+    response = JSONResponse(
+        {
+            "ok": True,
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "is_owner": user["is_owner"],
+            },
+            "event_id": event_id,
+            "role": role,
+        }
+    )
+    auth.set_session_cookie(response, request, user["id"])
+    return response
+
+
+# ------------------------------------------------------ members & invites ----
+
+
+def _require_event(conn, event_id: int) -> None:
+    if not conn.execute(
+        text("SELECT 1 FROM events WHERE id=:i"), {"i": event_id}
+    ).fetchone():
+        raise HTTPException(404, "Event not found")
+
+
+def _invite_out(inv) -> InviteOut:
+    return InviteOut(
+        code=inv["code"],
+        event_id=inv["event_id"],
+        role=inv["role"],
+        expires_at=inv["expires_at"],
+        used_by=inv["used_by"],
+    )
+
+
+@app.get("/api/admin/events/{event_id}/invites", response_model=list[InviteOut])
+def admin_list_invites(event_id: int, request: Request):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "invite", event_id)
+        rows = conn.execute(
+            text("SELECT * FROM invites WHERE event_id=:e ORDER BY expires_at DESC"),
+            {"e": event_id},
+        ).mappings().all()
+        return [_invite_out(r) for r in rows]
+
+
+@app.post("/api/admin/events/{event_id}/invites", response_model=InviteOut)
+def admin_create_invite(event_id: int, body: InviteCreateIn, request: Request):
+    user = auth.require_user(request)
+    role = body.role.strip()
+    if role not in _INVITE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(_INVITE_ROLES)}")
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "invite", event_id)
+        if role != "gate_staff" and not user["is_owner"]:
+            # A co-host may only invite gate staff.
+            raise HTTPException(403, "Only the owner can invite co-hosts")
+        code = auth.generate_invite_code()
+        expires = auth.invite_expiry_iso()
+        conn.execute(
+            text(
+                """INSERT INTO invites (code, event_id, role, created_by, expires_at)
+                   VALUES (:c, :e, :r, :b, :x)"""
+            ),
+            {"c": code, "e": event_id, "r": role, "b": user["id"], "x": expires},
+        )
+        return InviteOut(
+            code=code, event_id=event_id, role=role, expires_at=expires, used_by=None
+        )
+
+
+@app.get("/api/admin/events/{event_id}/members", response_model=list[EventMemberOut])
+def admin_list_members(event_id: int, request: Request):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "manage_members", event_id)
+        rows = conn.execute(
+            text(
+                """SELECT u.id, u.name, u.email, m.role
+                   FROM event_members m JOIN users u ON u.id = m.user_id
+                   WHERE m.event_id = :e ORDER BY u.name"""
+            ),
+            {"e": event_id},
+        ).mappings().all()
+        return [
+            EventMemberOut(
+                user_id=r["id"], name=r["name"], email=r["email"], role=r["role"]
+            )
+            for r in rows
+        ]
+
+
+@app.post("/api/admin/events/{event_id}/members", response_model=EventMemberOut)
+def admin_add_member(event_id: int, body: MemberAddIn, request: Request):
+    user = auth.require_user(request)
+    role = body.role.strip()
+    if role not in _INVITE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(_INVITE_ROLES)}")
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "manage_members", event_id)
+        target = auth.user_by_email(conn, body.email)
+        if not target:
+            raise HTTPException(404, "No user with that email — send an invite instead")
+        existing = conn.execute(
+            text(
+                "SELECT 1 FROM event_members WHERE event_id=:e AND user_id=:u"
+            ),
+            {"e": event_id, "u": target["id"]},
+        ).fetchone()
+        if existing:
+            raise HTTPException(409, "Already a member of this event")
+        conn.execute(
+            text(
+                "INSERT INTO event_members (event_id, user_id, role) VALUES (:e, :u, :r)"
+            ),
+            {"e": event_id, "u": target["id"], "r": role},
+        )
+        return EventMemberOut(
+            user_id=target["id"],
+            name=target["name"],
+            email=target["email"],
+            role=role,
+        )
+
+
+@app.patch("/api/admin/members/{event_id}/{user_id}", response_model=EventMemberOut)
+def admin_change_member_role(
+    event_id: int, user_id: int, body: MemberRoleIn, request: Request
+):
+    user = auth.require_user(request)
+    role = body.role.strip()
+    if role not in _INVITE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(_INVITE_ROLES)}")
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "manage_members", event_id)
+        member = conn.execute(
+            text(
+                """SELECT u.id, u.name, u.email, m.role
+                   FROM event_members m JOIN users u ON u.id = m.user_id
+                   WHERE m.event_id = :e AND m.user_id = :u"""
+            ),
+            {"e": event_id, "u": user_id},
+        ).mappings().fetchone()
+        if not member:
+            raise HTTPException(404, "Not a member of this event")
+        conn.execute(
+            text(
+                "UPDATE event_members SET role=:r WHERE event_id=:e AND user_id=:u"
+            ),
+            {"r": role, "e": event_id, "u": user_id},
+        )
+        return EventMemberOut(
+            user_id=member["id"],
+            name=member["name"],
+            email=member["email"],
+            role=role,
+        )
+
+
+@app.delete("/api/admin/members/{event_id}/{user_id}")
+def admin_remove_member(event_id: int, user_id: int, request: Request):
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "manage_members", event_id)
+        cur = conn.execute(
+            text(
+                "DELETE FROM event_members WHERE event_id=:e AND user_id=:u"
+            ),
+            {"e": event_id, "u": user_id},
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Not a member of this event")
+        return {"ok": True, "removed": user_id}
+
+
+@app.delete("/api/admin/events/{event_id}")
+def admin_delete_event(event_id: int, request: Request):
+    """Owner-only. Refuses while guest/registration data still points at the
+    event (wipe first) so rows never dangle without an authorization scope."""
+    user = auth.require_user(request)
+    with get_conn() as conn:
+        _require_event(conn, event_id)
+        auth.require_action(conn, user, "delete_event", event_id)
+        guests = conn.execute(
+            text("SELECT COUNT(*) FROM guests WHERE event_id=:e"), {"e": event_id}
+        ).scalar() or 0
+        regs = conn.execute(
+            text("SELECT COUNT(*) FROM registrations WHERE event_id=:e"),
+            {"e": event_id},
+        ).scalar() or 0
+        if guests or regs:
+            raise HTTPException(
+                409,
+                f"Event still has {guests} guests / {regs} registrations — "
+                "wipe the data before deleting the event",
+            )
+        conn.execute(text("DELETE FROM ticket_types WHERE event_id=:e"), {"e": event_id})
+        conn.execute(text("DELETE FROM event_members WHERE event_id=:e"), {"e": event_id})
+        conn.execute(text("DELETE FROM invites WHERE event_id=:e"), {"e": event_id})
+        conn.execute(text("DELETE FROM events WHERE id=:i"), {"i": event_id})
+        return {"ok": True, "deleted": event_id}

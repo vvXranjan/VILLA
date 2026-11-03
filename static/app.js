@@ -3,6 +3,123 @@ let stagedToken = null;
 let scanStream = null;
 let arrivedData = [];
 let pendingData = [];
+let currentUser = null;
+let statsTimer = null;
+
+/* =========================== auth =========================== */
+
+async function jfetch(url, opts) {
+  const resp = await fetch(url, opts);
+  if (resp.status === 401) {
+    // Session missing/expired — drop back to the login view.
+    showLogin();
+    throw new Error("Not authenticated");
+  }
+  return resp;
+}
+
+function roleLabel(u) {
+  if (u.is_owner) return "Owner";
+  const map = { co_host: "Co-host", gate_staff: "Gate staff" };
+  const labels = (u.memberships || []).map((m) => map[m.role] || m.role);
+  return labels[0] || "No access";
+}
+
+function applyUser(u) {
+  currentUser = u;
+  const label = `${u.name} · ${roleLabel(u)}`;
+  const side = $("#whoamiSide");
+  const top = $("#whoamiTop");
+  if (side) {
+    side.textContent = label;
+    side.hidden = false;
+  }
+  if (top) {
+    top.textContent = label;
+    top.hidden = false;
+  }
+  document.querySelectorAll("#logoutBtnSide, #logoutBtnTop").forEach((b) => {
+    b.hidden = false;
+  });
+}
+
+function showLogin() {
+  const app = $("#appRoot");
+  const view = $("#loginView");
+  if (app) app.hidden = true;
+  if (view) view.hidden = false;
+  if (statsTimer) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+}
+
+async function startApp(user) {
+  applyUser(user);
+  $("#appRoot").hidden = false;
+  $("#loginView").hidden = true;
+  loadStats();
+  if (!statsTimer) statsTimer = setInterval(loadStats, 5000);
+  searchInput.focus();
+}
+
+async function boot() {
+  try {
+    const me = await (await fetch("/api/me")).json();
+    if (me.user) {
+      await startApp(me.user);
+      return;
+    }
+  } catch (e) {
+    // fall through to login view
+  }
+  showLogin();
+}
+
+const loginForm = $("#loginForm");
+if (loginForm) {
+  loginForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const errBox = $("#loginError");
+    errBox.hidden = true;
+    const btn = e.target.querySelector("button[type=submit]");
+    btn.disabled = true;
+    try {
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: $("#loginEmail").value.trim(),
+          password: $("#loginPassword").value,
+        }),
+      });
+      const r = await resp.json();
+      if (!resp.ok) {
+        errBox.textContent = r.detail || "Sign-in failed";
+        errBox.hidden = false;
+        return;
+      }
+      $("#loginPassword").value = "";
+      const me = await (await fetch("/api/me")).json();
+      await startApp(me.user || r.user);
+    } catch (err) {
+      errBox.textContent = "Could not reach the server";
+      errBox.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+document.querySelectorAll("#logoutBtnSide, #logoutBtnTop").forEach((b) => {
+  b.onclick = async () => {
+    try {
+      await fetch("/api/logout", { method: "POST" });
+    } catch (e) {}
+    showLogin();
+    toast("Signed out", "ok");
+  };
+});
 
 /* =========================== navigation =========================== */
 
@@ -31,7 +148,7 @@ if (openGateBtn) openGateBtn.onclick = () => showTab("checkin");
 
 async function loadStats() {
   try {
-    const s = await (await fetch("/api/stats")).json();
+    const s = await (await jfetch("/api/stats")).json();
 
     setText("#kpiTotal", s.total);
     setText("#kpiPaid", s.paid);
@@ -73,8 +190,6 @@ function setText(sel, val) {
   if (el) el.textContent = val;
 }
 
-setInterval(loadStats, 5000);
-
 /* =============================== toast =============================== */
 
 function toast(msg, kind = "ok") {
@@ -102,7 +217,7 @@ async function loadActivity() {
   const box = $("#activityList");
   if (!box) return;
   try {
-    const res = await (await fetch("/api/list/arrived")).json();
+    const res = await (await jfetch("/api/list/arrived")).json();
     const recent = res.slice().reverse().slice(0, 8);
     if (!recent.length) {
       box.innerHTML = '<div class="empty">The gate is quiet — no check-ins yet.</div>';
@@ -141,7 +256,7 @@ async function doSearch() {
   const box = $("#results");
   box.innerHTML = "";
   if (!q) return;
-  const regs = await (await fetch("/api/registrations?q=" + encodeURIComponent(q))).json();
+  const regs = await (await jfetch("/api/registrations?q=" + encodeURIComponent(q))).json();
   if (!regs.length) {
     box.innerHTML = '<div class="reg-card"><div class="empty">No guests found for “' + esc(q) + '”.</div></div>';
     return;
@@ -211,7 +326,7 @@ function regCard(r) {
 
   card.querySelectorAll("button[data-gid]").forEach((b) => {
     b.onclick = async () => {
-      const res = await (await fetch(`/api/guests/${b.dataset.gid}/checkin`, { method: "POST" })).json();
+      const res = await (await jfetch(`/api/guests/${b.dataset.gid}/checkin`, { method: "POST" })).json();
       toast(res.message, res.ok ? "ok" : "bad");
       loadStats();
       refreshSearchOrList();
@@ -222,7 +337,7 @@ function regCard(r) {
       const n = prompt(`Add companion name for ${b.dataset.reg}\n(leave blank to cancel — companions are never invented):`);
       if (!n || !n.trim()) return;
       try {
-        const resp = await fetch(
+        const resp = await jfetch(
           `/api/admin/add_companion?reg_id=${encodeURIComponent(b.dataset.reg)}&name=${encodeURIComponent(n.trim())}`,
           { method: "POST" }
         );
@@ -253,8 +368,8 @@ function refreshSearchOrList() {
 
 async function resolveToken(token) {
   try {
-    const g = await (await fetch("/api/qr/" + encodeURIComponent(token))).json();
-    const regs = await (await fetch("/api/registrations?q=" + encodeURIComponent(g.reg_id))).json();
+    const g = await (await jfetch("/api/qr/" + encodeURIComponent(token))).json();
+    const regs = await (await jfetch("/api/registrations?q=" + encodeURIComponent(g.reg_id))).json();
     const box = $("#results");
     box.innerHTML = "";
     if (regs.length) box.appendChild(regCard(regs[0]));
@@ -268,7 +383,7 @@ async function resolveToken(token) {
 /* ============================ list screens ============================ */
 
 async function loadArrived() {
-  arrivedData = await (await fetch("/api/list/arrived")).json();
+  arrivedData = await (await jfetch("/api/list/arrived")).json();
   renderArrived();
 }
 
@@ -303,7 +418,7 @@ function renderArrived() {
 }
 
 async function loadPending() {
-  pendingData = await (await fetch("/api/list/pending")).json();
+  pendingData = await (await jfetch("/api/list/pending")).json();
   renderPending();
 }
 
@@ -350,8 +465,8 @@ async function loadReview() {
   const box = $("#reviewList");
   try {
     const [manual, regs] = await Promise.all([
-      fetch("/api/list/manual_review").then((r) => r.json()),
-      fetch("/api/registrations?q=").then((r) => r.json()),
+      jfetch("/api/list/manual_review").then((r) => r.json()),
+      jfetch("/api/registrations?q=").then((r) => r.json()),
     ]);
     const unpaid = regs.filter((r) => r.payment_status === "UNPAID");
     const unknown = regs.filter((r) => r.payment_status === "UNDER REVIEW");
@@ -415,7 +530,7 @@ async function loadReview() {
         const n = prompt(`Add companion name for ${regId} (never invented automatically):`);
         if (!n || !n.trim()) return;
         try {
-          const resp = await fetch(
+          const resp = await jfetch(
             `/api/admin/add_companion?reg_id=${encodeURIComponent(regId)}&name=${encodeURIComponent(n.trim())}`,
             { method: "POST" }
           );
@@ -450,7 +565,7 @@ $("#previewBtn").onclick = async () => {
   if (!f) return toast("Choose a CSV file first", "warn");
   const fd = new FormData();
   fd.append("file", f);
-  const resp = await fetch("/api/import/preview", { method: "POST", body: fd });
+  const resp = await jfetch("/api/import/preview", { method: "POST", body: fd });
   const p = await resp.json();
   if (!resp.ok) {
     $("#previewBox").hidden = false;
@@ -492,7 +607,7 @@ $("#confirmBtn").onclick = async () => {
   if (!confirm("Confirm import of this guest list?")) return;
   const wipe = $("#wipeCheck").checked;
   if (wipe && !confirm("You chose to REPLACE the entire existing guest list. A backup will be saved. Continue?")) return;
-  const resp = await fetch(
+  const resp = await jfetch(
     `/api/import/confirm?token=${stagedToken}&wipe_existing=${wipe}`,
     { method: "POST" }
   );
@@ -511,7 +626,7 @@ $("#confirmBtn").onclick = async () => {
 
 $("#resetAllBtn").onclick = async () => {
   if (!confirm("Reset ALL check-ins? This cannot be undone.")) return;
-  const r = await (await fetch("/api/admin/reset_all", { method: "POST" })).json();
+  const r = await (await jfetch("/api/admin/reset_all", { method: "POST" })).json();
   toast(`Reset ${r.reset} check-ins`, "warn");
   loadStats();
 };
@@ -565,5 +680,4 @@ function stopScan() {
 }
 
 /* =============================== init =============================== */
-loadStats();
-searchInput.focus();
+boot();

@@ -160,3 +160,61 @@ class TicketTypeEditIn(BaseModel):
     group_size: Optional[int] = None
     capacity: Optional[int] = None
     sale_open: Optional[bool] = None
+
+
+# ------------------------------------------------------------------- auth ----
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    id: int
+    name: str
+    email: str
+    is_owner: bool = False
+
+
+class InviteCreateIn(BaseModel):
+    role: str = "gate_staff"  # gate_staff | co_host
+
+
+class InviteStatusOut(BaseModel):
+    code: str
+    valid: bool
+    reason: str = ""  # unknown | used | expired
+    role: str = ""
+    event_id: Optional[int] = None
+    event_title: str = ""
+
+
+class InviteAcceptIn(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class InviteOut(BaseModel):
+    code: str
+    event_id: int
+    role: str
+    expires_at: str
+    used_by: Optional[int] = None
+
+
+class EventMemberOut(BaseModel):
+    user_id: int
+    name: str
+    email: str
+    role: str
+
+
+class MemberAddIn(BaseModel):
+    email: str
+    role: str
+
+
+class MemberRoleIn(BaseModel):
+    role: str

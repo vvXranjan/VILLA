@@ -171,6 +171,36 @@ CREATE TABLE IF NOT EXISTS ticket_types (
 );
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_types_event ON ticket_types(event_id);
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_owner INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+);
+CREATE TABLE IF NOT EXISTS event_members (
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    PRIMARY KEY (event_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_members_user ON event_members(user_id);
+CREATE TABLE IF NOT EXISTS invites (
+    code TEXT PRIMARY KEY,
+    event_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    created_by INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_invites_event ON invites(event_id);
+CREATE TABLE IF NOT EXISTS login_attempts (
+    key TEXT PRIMARY KEY,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT NOT NULL,
+    last_attempt TEXT NOT NULL
+);
 """
 
 _SQLITE_DDL = """
@@ -248,6 +278,36 @@ CREATE TABLE IF NOT EXISTS ticket_types (
 );
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_ticket_types_event ON ticket_types(event_id);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_owner INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS event_members (
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    PRIMARY KEY (event_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_members_user ON event_members(user_id);
+CREATE TABLE IF NOT EXISTS invites (
+    code TEXT PRIMARY KEY,
+    event_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    created_by INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_invites_event ON invites(event_id);
+CREATE TABLE IF NOT EXISTS login_attempts (
+    key TEXT PRIMARY KEY,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT NOT NULL,
+    last_attempt TEXT NOT NULL
+);
 """
 
 
